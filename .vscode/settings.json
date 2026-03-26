@@ -1,0 +1,11 @@
+{
+  "explorer.sortOrder": "mixed",
+  "cSpell.customDictionaries": {
+    "project-terms": {
+      "name": "project-terms",
+      "path": "${workspaceRoot}/.vscode/cspell/project-terms.txt",
+      "addWords": true,
+      "scope": "workspace"
+    }
+  }
+}

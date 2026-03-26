@@ -1,0 +1,5 @@
+# cSpell:words file for libbft
+# Add one term per line.
+
+bft
+libbft
