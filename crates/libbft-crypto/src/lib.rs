@@ -27,3 +27,24 @@ mod digest_fmt {
         }
     }
 }
+
+pub struct DummyCrypto;
+
+impl CryptoKit for DummyCrypto {
+    type Sig = ();
+
+    fn digest(&self, _bytes: &[u8]) -> Digest {
+        Digest([0xde, 0xad, 0xbe, 0xef].into())
+    }
+
+    fn sign(&self, _bytes: &[u8]) -> Self::Sig {}
+
+    fn verify(
+        &self,
+        _bytes: &[u8],
+        (): &Self::Sig,
+        _replica_index: ReplicaIndex,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
