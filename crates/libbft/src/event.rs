@@ -19,6 +19,12 @@ pub trait Emit<E: Event> {
     }
 }
 
+impl<E: Event> Emit<E> for Option<Sender<E::Type>> {
+    fn tx_slot(&mut self) -> &mut Option<Sender<E::Type>> {
+        self
+    }
+}
+
 pub trait EmitMap<K, E: Event> {
     fn tx_map_slot(&mut self) -> &mut Option<HashMap<K, Sender<E::Type>>>;
 
@@ -29,5 +35,11 @@ pub trait EmitMap<K, E: Event> {
             "{} Tx map was already set",
             type_name::<E>()
         );
+    }
+}
+
+impl<K, E: Event> EmitMap<K, E> for Option<HashMap<K, Sender<E::Type>>> {
+    fn tx_map_slot(&mut self) -> &mut Option<HashMap<K, Sender<E::Type>>> {
+        self
     }
 }

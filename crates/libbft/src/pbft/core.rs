@@ -17,16 +17,16 @@ pub type SeqNum = u64;
 pub type Digest = crate::crypto::Digest;
 
 pub struct PbftParams {
-    num_replicas: usize,
-    num_faulty_replicas: usize,
+    pub num_replicas: usize,
+    pub num_faulty_replicas: usize,
 }
 
 pub struct PbftCoreConfig {
-    params: PbftParams,
-    replica_index: ReplicaIndex,
+    pub params: PbftParams,
+    pub replica_index: ReplicaIndex,
 
-    window_size: SeqNum,
-    max_block_size: usize,
+    pub window_size: SeqNum,
+    pub max_block_size: usize,
 }
 
 pub trait PbftCoreContext {
@@ -420,6 +420,10 @@ pub struct PbftCoreCrypto<C> {
 }
 
 impl<C: PbftCoreCryptoContext> PbftCoreCrypto<C> {
+    pub fn new(context: C, params: PbftParams) -> Self {
+        Self { context, params }
+    }
+
     // TODO avoid redundant serialization on `requests`
 
     pub fn sign(&self, message: &mut PbftMessage) -> (Vec<u8>, C::Sig) {

@@ -17,6 +17,8 @@ mod core;
 #[cfg(test)]
 mod tests;
 
+pub use core::{PbftCoreConfig, PbftParams};
+
 pub mod events {
     use bytes::Bytes;
 
@@ -200,10 +202,10 @@ pub struct PbftCryptoVerifyWorker<C: core::PbftCoreCryptoContext> {
 }
 
 impl<C: core::PbftCoreCryptoContext> PbftCryptoVerifyWorker<C> {
-    pub fn new(core_crypto: core::PbftCoreCrypto<C>) -> Self {
+    pub fn new(core_crypto_context: C, params: core::PbftParams) -> Self {
         let (bytes_tx, bytes_rx) = channel(1000);
         Self {
-            core_crypto,
+            core_crypto: core::PbftCoreCrypto::new(core_crypto_context, params),
             bytes_tx,
             bytes_rx,
             signed_message_tx: None,
@@ -265,10 +267,10 @@ pub struct PbftCryptoSignWorker<C: core::PbftCoreCryptoContext> {
 }
 
 impl<C: core::PbftCoreCryptoContext> PbftCryptoSignWorker<C> {
-    pub fn new(core_crypto: core::PbftCoreCrypto<C>) -> Self {
+    pub fn new(core_crypto_context: C, params: core::PbftParams) -> Self {
         let (message_tx, message_rx) = channel(1000);
         Self {
-            core_crypto,
+            core_crypto: core::PbftCoreCrypto::new(core_crypto_context, params),
             message_tx,
             message_rx,
             bytes_tx_map: None,
@@ -276,10 +278,7 @@ impl<C: core::PbftCoreCryptoContext> PbftCryptoSignWorker<C> {
         }
     }
 
-    pub fn register<Ctx: core::PbftCoreContext>(
-        &mut self,
-        emit_send_message: &mut impl Emit<events::SendMessage>,
-    ) {
+    pub fn register(&mut self, emit_send_message: &mut impl Emit<events::SendMessage>) {
         emit_send_message.set_tx(self.message_tx.clone());
     }
 }
