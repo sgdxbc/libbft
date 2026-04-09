@@ -311,15 +311,7 @@ impl<C: core::PbftCoreCryptoContext> PbftCryptoSignWorker<C> {
             let bytes = bytes.into();
             match recipient {
                 Recipient::To(to) => {
-                    if let Err(err) = self
-                        .bytes_tx_map
-                        .as_ref()
-                        .unwrap()
-                        .get(&to)
-                        .unwrap()
-                        .send(bytes)
-                        .await
-                    {
+                    if let Err(err) = self.bytes_tx_map.as_ref().unwrap()[&to].send(bytes).await {
                         warn!("Failed to send message to node {to}: {err}");
                     }
                 }
@@ -329,16 +321,16 @@ impl<C: core::PbftCoreCryptoContext> PbftCryptoSignWorker<C> {
                             warn!("Failed to broadcast message to node {to}: {err}");
                         }
                     }
+                    if let Err(err) = self
+                        .loopback_tx
+                        .as_ref()
+                        .unwrap()
+                        .send((message, sig))
+                        .await
+                    {
+                        warn!("Failed to send signed message to node: {err}");
+                    }
                 }
-            }
-            if let Err(err) = self
-                .loopback_tx
-                .as_ref()
-                .unwrap()
-                .send((message, sig))
-                .await
-            {
-                warn!("Failed to send signed message to node: {err}");
             }
         }
     }
