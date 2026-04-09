@@ -11,11 +11,25 @@ pub type ClientAddr = SocketAddr;
 pub type ClientSeqNum = u64;
 pub type ViewNum = u64;
 pub type SeqNum = u64;
-pub type Digest = Vec<u8>;
 
-pub struct PbftCoreConfig {
+#[derive(BorshSerialize, BorshDeserialize, Clone, Default, PartialEq, Eq)]
+pub struct Digest(pub Vec<u8>);
+
+mod digest_fmt {
+    impl std::fmt::Debug for super::Digest {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "Digest({})", hex::encode(&self.0))
+        }
+    }
+}
+
+pub struct PbftParams {
     num_replicas: usize,
     num_faulty_replicas: usize,
+}
+
+pub struct PbftCoreConfig {
+    params: PbftParams,
     replica_index: ReplicaIndex,
 
     window_size: SeqNum,
@@ -105,13 +119,9 @@ struct LogSlot<S> {
     signed_commits: HashMap<ReplicaIndex, (Commit, S)>,
 }
 
-impl PbftCoreConfig {
+impl PbftParams {
     fn view_leader(&self, view_num: ViewNum) -> ReplicaIndex {
         ((view_num as usize) % self.num_replicas) as _
-    }
-
-    fn is_view_leader(&self, view_num: ViewNum) -> bool {
-        self.replica_index == self.view_leader(view_num)
     }
 
     fn slot_prepared<S>(&self, slot: &LogSlot<S>) -> bool {
@@ -120,6 +130,12 @@ impl PbftCoreConfig {
 
     fn slot_committed<S>(&self, slot: &LogSlot<S>) -> bool {
         slot.signed_commits.len() >= self.num_replicas - self.num_faulty_replicas
+    }
+}
+
+impl PbftCoreConfig {
+    fn is_view_leader(&self, view_num: ViewNum) -> bool {
+        self.replica_index == self.params.view_leader(view_num)
     }
 }
 
@@ -212,7 +228,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
             }
             PbftMessage::Prepare(prepare) => {
                 if let Some(slot) = self.log.get(&prepare.seq_num)
-                    && self.config.slot_prepared(slot)
+                    && self.config.params.slot_prepared(slot)
                 {
                     return;
                 }
@@ -220,7 +236,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
             }
             PbftMessage::Commit(commit) => {
                 if let Some(slot) = self.log.get(&commit.seq_num)
-                    && self.config.slot_committed(slot)
+                    && self.config.params.slot_committed(slot)
                 {
                     return;
                 }
@@ -297,7 +313,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
             );
             return;
         }
-        if self.config.slot_prepared(slot) {
+        if self.config.params.slot_prepared(slot) {
             info!(
                 self.config.replica_index,
                 "Sending Commit for already prepared slot seq_num {} to replica {}",
@@ -324,7 +340,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
         let slot = self.log.get_mut(&seq_num).unwrap();
         slot.signed_prepares
             .insert(prepare.replica_index, (prepare, sig));
-        if self.config.slot_prepared(slot) {
+        if self.config.params.slot_prepared(slot) {
             let commit = Commit {
                 view_num: self.view_num,
                 seq_num,
@@ -354,7 +370,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
             );
             return;
         }
-        if self.config.slot_committed(slot) {
+        if self.config.params.slot_committed(slot) {
             return;
         }
         self.insert_commit(commit, sig);
@@ -364,14 +380,14 @@ impl<C: PbftCoreContext> PbftCore<C> {
         let slot = self.log.get_mut(&commit.seq_num).unwrap();
         slot.signed_commits
             .insert(commit.replica_index, (commit, sig));
-        if self.config.slot_committed(slot) {
+        if self.config.params.slot_committed(slot) {
             self.execute_slots();
         }
     }
 
     fn execute_slots(&mut self) {
         while let Some(slot) = self.log.get(&(self.executed_seq_num + 1)) {
-            if !self.config.slot_committed(slot) {
+            if !self.config.params.slot_committed(slot) {
                 break;
             }
             self.context.deliver(slot.requests.clone(), self.view_num);
@@ -381,6 +397,69 @@ impl<C: PbftCoreContext> PbftCore<C> {
             && !self.pending_requests.is_empty()
         {
             self.close_batch();
+        }
+    }
+}
+
+pub trait PbftCryptoContext {
+    type Sig;
+
+    fn sign(&self, bytes: &[u8]) -> Self::Sig;
+
+    fn verify(
+        &self,
+        bytes: &[u8],
+        sig: &Self::Sig,
+        replica_index: ReplicaIndex,
+    ) -> anyhow::Result<()>;
+
+    fn digest(&self, bytes: &[u8]) -> Digest;
+}
+
+pub struct PbftCrypto<C> {
+    context: C,
+    params: PbftParams,
+}
+
+impl<C: PbftCryptoContext> PbftCrypto<C> {
+    pub fn sign(&self, message: &mut PbftMessage) -> C::Sig {
+        match message {
+            PbftMessage::PrePrepare(pre_prepare, requests) => {
+                let requests_bytes = borsh::to_vec(requests).unwrap();
+                pre_prepare.digest = self.context.digest(&requests_bytes);
+                let bytes = borsh::to_vec(pre_prepare).unwrap();
+                self.context.sign(&bytes)
+            }
+            PbftMessage::Prepare(prepare) => self.context.sign(&borsh::to_vec(prepare).unwrap()),
+            PbftMessage::Commit(commit) => self.context.sign(&borsh::to_vec(commit).unwrap()),
+        }
+    }
+
+    pub fn verify(&self, message: &PbftMessage, sig: &C::Sig) -> anyhow::Result<()> {
+        match message {
+            PbftMessage::PrePrepare(pre_prepare, requests) => {
+                let requests_bytes = borsh::to_vec(requests).unwrap();
+                let expected_digest = self.context.digest(&requests_bytes);
+                anyhow::ensure!(
+                    pre_prepare.digest == expected_digest,
+                    "Invalid PrePrepare digest: expected {:?}, got {:?}",
+                    expected_digest,
+                    pre_prepare.digest
+                );
+                self.context.verify(
+                    &borsh::to_vec(pre_prepare).unwrap(),
+                    sig,
+                    self.params.view_leader(pre_prepare.view_num),
+                )
+            }
+            PbftMessage::Prepare(prepare) => {
+                self.context
+                    .verify(&borsh::to_vec(prepare).unwrap(), sig, prepare.replica_index)
+            }
+            PbftMessage::Commit(commit) => {
+                self.context
+                    .verify(&borsh::to_vec(commit).unwrap(), sig, commit.replica_index)
+            }
         }
     }
 }
