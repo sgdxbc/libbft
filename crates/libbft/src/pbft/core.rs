@@ -4,6 +4,7 @@ use std::{
 };
 
 use borsh::{BorshDeserialize, BorshSerialize};
+use tokio::time::Instant;
 use tracing::{info, warn};
 
 pub type ReplicaIndex = u8;
@@ -224,7 +225,8 @@ impl<C: PbftCoreContext> PbftCore<C> {
         }
     }
 
-    pub async fn tick(&mut self) {
+    pub async fn tick(&mut self, now: Instant) {
+        let _ = now;
         //
     }
 

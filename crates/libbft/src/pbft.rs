@@ -1,8 +1,11 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use bytes::Bytes;
 use libbft_crypto::Sig as _;
-use tokio::sync::mpsc::{Receiver, Sender, channel};
+use tokio::{
+    sync::mpsc::{Receiver, Sender, channel},
+    time::interval,
+};
 use tracing::warn;
 
 mod core;
@@ -15,6 +18,8 @@ where
 {
     core: core::PbftCore<PbftCoreContextState<C::Sig>>,
 
+    request_tx: Sender<core::PbftRequest>,
+    request_rx: Receiver<core::PbftRequest>,
     signed_message_tx: Sender<(core::PbftMessage, C::Sig)>,
     signed_message_rx: Receiver<(core::PbftMessage, C::Sig)>,
     loopback_tx: Sender<(core::PbftMessage, C::Sig)>,
@@ -35,6 +40,7 @@ pub enum Recipient {
 
 impl<C: core::PbftCoreContext> PbftNode<C> {
     pub fn new(config: core::PbftCoreConfig) -> Self {
+        let (request_tx, request_rx) = channel(1000);
         let (signed_message_tx, signed_message_rx) = channel(1000);
         let (loopback_tx, loopback_rx) = channel(1000);
         let core_context = PbftCoreContextState {
@@ -45,6 +51,8 @@ impl<C: core::PbftCoreContext> PbftNode<C> {
         let core = core::PbftCore::new(core_context, config);
         Self {
             core,
+            request_tx,
+            request_rx,
             signed_message_tx,
             signed_message_rx,
             loopback_tx,
@@ -52,23 +60,18 @@ impl<C: core::PbftCoreContext> PbftNode<C> {
         }
     }
 
+    pub fn register<Ctx: core::PbftCoreCryptoContext<Sig = C::Sig>>(
+        &self,
+        verify_worker: &mut PbftCryptoVerifyWorker<Ctx>,
+        sign_worker: &mut PbftCryptoSignWorker<Ctx>,
+    ) {
+        verify_worker.set_signed_message_tx(self.signed_message_tx.clone());
+        sign_worker.set_loopback_tx(self.loopback_tx.clone());
+    }
+
     fn set_message_tx(&mut self, message_tx: Sender<(Recipient, core::PbftMessage)>) {
         let replaced = self.core.context.message_tx.replace(message_tx);
         assert!(replaced.is_none(), "message_tx can only be set once");
-    }
-
-    pub fn register_crypto_verify_worker<Ctx: core::PbftCoreCryptoContext<Sig = C::Sig>>(
-        &mut self,
-        worker: &mut PbftCryptoVerifyWorker<Ctx>,
-    ) {
-        worker.set_signed_message_tx(self.signed_message_tx.clone());
-    }
-
-    pub fn register_crypto_sign_worker<Ctx: core::PbftCoreCryptoContext<Sig = C::Sig>>(
-        &mut self,
-        worker: &mut PbftCryptoSignWorker<Ctx>,
-    ) {
-        worker.set_loopback_tx(self.loopback_tx.clone());
     }
 
     pub fn set_deliver_tx(&mut self, deliver_tx: Sender<(Vec<core::PbftRequest>, core::ViewNum)>) {
@@ -77,15 +80,21 @@ impl<C: core::PbftCoreContext> PbftNode<C> {
     }
 
     pub async fn run(&mut self) {
+        let mut interval = interval(Duration::from_millis(100));
         loop {
             tokio::select! {
+                Some(request) = self.request_rx.recv() => {
+                    self.core.handle_request(request).await;
+                }
                 Some((message, sig)) = self.signed_message_rx.recv() => {
                     self.core.handle_message(message, sig).await;
                 }
                 Some((message, sig)) = self.loopback_rx.recv() => {
                     self.core.handle_loopback_message(message, sig).await;
                 }
-                // TODO tick
+                now = interval.tick() => {
+                    self.core.tick(now).await;
+                }
             }
         }
     }
@@ -205,7 +214,7 @@ impl<C: core::PbftCoreCryptoContext> PbftCryptoSignWorker<C> {
         }
     }
 
-    pub fn register_message_tx<Ctx: core::PbftCoreContext>(&mut self, node: &mut PbftNode<Ctx>) {
+    pub fn register<Ctx: core::PbftCoreContext>(&mut self, node: &mut PbftNode<Ctx>) {
         node.set_message_tx(self.message_tx.clone());
     }
 
@@ -214,7 +223,7 @@ impl<C: core::PbftCoreCryptoContext> PbftCryptoSignWorker<C> {
         assert!(replaced.is_none(), "bytes_tx_map can only be set once");
     }
 
-    pub fn set_loopback_tx(&mut self, loopback_tx: Sender<(core::PbftMessage, C::Sig)>) {
+    fn set_loopback_tx(&mut self, loopback_tx: Sender<(core::PbftMessage, C::Sig)>) {
         let replaced = self.loopback_tx.replace(loopback_tx);
         assert!(replaced.is_none(), "loopback_tx can only be set once");
     }
