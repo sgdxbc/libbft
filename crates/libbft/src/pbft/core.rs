@@ -30,13 +30,21 @@ pub trait PbftCoreContext {
     // "message" is short for "peer message" in this codebase
 
     // sign `message` and send message along with the signature to `to`
-    fn send_message(&mut self, to: ReplicaIndex, message: PbftMessage);
+    fn send_message(
+        &mut self,
+        to: ReplicaIndex,
+        message: PbftMessage,
+    ) -> impl Future<Output = ()> + Send;
 
     // sign `message` and broadcast message along with the signature, and call
     // `handle_loopback_message` with the message and signature
-    fn broadcast_message(&mut self, message: PbftMessage);
+    fn broadcast_message(&mut self, message: PbftMessage) -> impl Future<Output = ()> + Send;
 
-    fn deliver(&mut self, requests: Vec<PbftRequest>, view_num: ViewNum);
+    fn deliver(
+        &mut self,
+        requests: Vec<PbftRequest>,
+        view_num: ViewNum,
+    ) -> impl Future<Output = ()> + Send;
 
     type Sig;
 }
@@ -153,19 +161,19 @@ impl<C: PbftCoreContext> PbftCore<C> {
         }
     }
 
-    pub fn handle_request(&mut self, request: PbftRequest) {
+    pub async fn handle_request(&mut self, request: PbftRequest) {
         if !self.config.is_view_leader(self.view_num) {
             // TODO set timer
             return;
         }
         self.pending_requests.push(request);
         if self.seq_num < self.executed_seq_num + self.config.window_size {
-            self.close_batch();
+            self.close_batch().await;
         }
     }
 
     // should call with verified messages and their signatures
-    pub fn handle_message(&mut self, message: PbftMessage, sig: C::Sig) {
+    pub async fn handle_message(&mut self, message: PbftMessage, sig: C::Sig) {
         if message.view_num() != self.view_num {
             if message.view_num() > self.view_num {
                 // TODO state transfer if necessary
@@ -174,16 +182,16 @@ impl<C: PbftCoreContext> PbftCore<C> {
         }
         match message {
             PbftMessage::PrePrepare(pre_prepare, requests) => {
-                self.handle_pre_prepare(pre_prepare, requests, sig)
+                self.handle_pre_prepare(pre_prepare, requests, sig).await
             }
-            PbftMessage::Prepare(prepare) => self.handle_prepare(prepare, sig),
-            PbftMessage::Commit(commit) => self.handle_commit(commit, sig),
+            PbftMessage::Prepare(prepare) => self.handle_prepare(prepare, sig).await,
+            PbftMessage::Commit(commit) => self.handle_commit(commit, sig).await,
         }
     }
 
     // trusted loopback messages that may be processed differently or bypass some further validation
     // compared to verified remote messages
-    pub fn handle_loopback_message(&mut self, message: PbftMessage, sig: C::Sig) {
+    pub async fn handle_loopback_message(&mut self, message: PbftMessage, sig: C::Sig) {
         if message.view_num() != self.view_num {
             return;
         }
@@ -206,7 +214,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
                 {
                     return;
                 }
-                self.insert_prepare(prepare, sig)
+                self.insert_prepare(prepare, sig).await
             }
             PbftMessage::Commit(commit) => {
                 if let Some(slot) = self.log.get(&commit.seq_num)
@@ -214,16 +222,16 @@ impl<C: PbftCoreContext> PbftCore<C> {
                 {
                     return;
                 }
-                self.insert_commit(commit, sig)
+                self.insert_commit(commit, sig).await
             }
         }
     }
 
-    pub fn tick(&mut self) {
+    pub async fn tick(&mut self) {
         //
     }
 
-    fn close_batch(&mut self) {
+    async fn close_batch(&mut self) {
         self.seq_num += 1;
         let digest = Default::default(); // will be filled by crypto worker
         let pre_prepare = PrePrepare {
@@ -236,10 +244,11 @@ impl<C: PbftCoreContext> PbftCore<C> {
             .drain(..self.pending_requests.len().min(self.config.max_block_size))
             .collect();
         self.context
-            .broadcast_message(PbftMessage::PrePrepare(pre_prepare, requests));
+            .broadcast_message(PbftMessage::PrePrepare(pre_prepare, requests))
+            .await;
     }
 
-    fn handle_pre_prepare(
+    async fn handle_pre_prepare(
         &mut self,
         pre_prepare: PrePrepare,
         requests: Vec<PbftRequest>,
@@ -275,20 +284,21 @@ impl<C: PbftCoreContext> PbftCore<C> {
             replica_index: self.config.replica_index,
         };
         self.context
-            .broadcast_message(PbftMessage::Prepare(prepare));
+            .broadcast_message(PbftMessage::Prepare(prepare))
+            .await;
         if let Some(prepares) = self.reorder_prepares.remove(&seq_num) {
             for (prepare, sig) in prepares {
-                self.handle_prepare(prepare, sig);
+                self.handle_prepare(prepare, sig).await;
             }
         }
         if let Some(commits) = self.reorder_commits.remove(&seq_num) {
             for (commit, sig) in commits {
-                self.handle_commit(commit, sig);
+                self.handle_commit(commit, sig).await;
             }
         }
     }
 
-    fn handle_prepare(&mut self, prepare: Prepare, sig: C::Sig) {
+    async fn handle_prepare(&mut self, prepare: Prepare, sig: C::Sig) {
         let Some(slot) = &self.log.get(&prepare.seq_num) else {
             self.reorder_prepares
                 .entry(prepare.seq_num)
@@ -322,13 +332,14 @@ impl<C: PbftCoreContext> PbftCore<C> {
                 replica_index: self.config.replica_index,
             };
             self.context
-                .send_message(prepare.replica_index, PbftMessage::Commit(commit));
+                .send_message(prepare.replica_index, PbftMessage::Commit(commit))
+                .await;
             return;
         }
-        self.insert_prepare(prepare, sig);
+        self.insert_prepare(prepare, sig).await;
     }
 
-    fn insert_prepare(&mut self, prepare: Prepare, sig: C::Sig) {
+    async fn insert_prepare(&mut self, prepare: Prepare, sig: C::Sig) {
         let seq_num = prepare.seq_num;
         let digest = prepare.digest.clone();
         let slot = self.log.get_mut(&seq_num).unwrap();
@@ -341,11 +352,13 @@ impl<C: PbftCoreContext> PbftCore<C> {
                 digest,
                 replica_index: self.config.replica_index,
             };
-            self.context.broadcast_message(PbftMessage::Commit(commit));
+            self.context
+                .broadcast_message(PbftMessage::Commit(commit))
+                .await;
         }
     }
 
-    fn handle_commit(&mut self, commit: Commit, sig: C::Sig) {
+    async fn handle_commit(&mut self, commit: Commit, sig: C::Sig) {
         let Some(slot) = &self.log.get(&commit.seq_num) else {
             self.reorder_commits
                 .entry(commit.seq_num)
@@ -367,51 +380,53 @@ impl<C: PbftCoreContext> PbftCore<C> {
         if self.config.params.slot_committed(slot) {
             return;
         }
-        self.insert_commit(commit, sig);
+        self.insert_commit(commit, sig).await;
     }
 
-    fn insert_commit(&mut self, commit: Commit, sig: C::Sig) {
+    async fn insert_commit(&mut self, commit: Commit, sig: C::Sig) {
         let slot = self.log.get_mut(&commit.seq_num).unwrap();
         slot.signed_commits
             .insert(commit.replica_index, (commit, sig));
         if self.config.params.slot_committed(slot) {
-            self.execute_slots();
+            self.execute_slots().await;
         }
     }
 
-    fn execute_slots(&mut self) {
+    async fn execute_slots(&mut self) {
         while let Some(slot) = self.log.get(&(self.executed_seq_num + 1)) {
             if !self.config.params.slot_committed(slot) {
                 break;
             }
-            self.context.deliver(slot.requests.clone(), self.view_num);
+            self.context
+                .deliver(slot.requests.clone(), self.view_num)
+                .await;
             self.executed_seq_num += 1;
         }
         if self.seq_num < self.executed_seq_num + self.config.window_size
             && !self.pending_requests.is_empty()
         {
-            self.close_batch();
+            self.close_batch().await;
         }
     }
 }
 
-pub trait PbftCryptoContext: libbft_crypto::CryptoKit {}
-impl<C: libbft_crypto::CryptoKit> PbftCryptoContext for C {}
+pub trait PbftCoreCryptoContext: libbft_crypto::CryptoKit {}
+impl<C: libbft_crypto::CryptoKit> PbftCoreCryptoContext for C {}
 
-pub struct PbftCrypto<C> {
+pub struct PbftCoreCrypto<C> {
     context: C,
     params: PbftParams,
 }
 
-impl<C: PbftCryptoContext> PbftCrypto<C> {
+impl<C: PbftCoreCryptoContext> PbftCoreCrypto<C> {
     // TODO avoid redundant serialization on `requests`
 
-    pub fn seal(&self, mut message: PbftMessage) -> (Vec<u8>, C::Sig) {
-        if let PbftMessage::PrePrepare(pre_prepare, requests) = &mut message {
+    pub fn seal(&self, message: &mut PbftMessage) -> (Vec<u8>, C::Sig) {
+        if let PbftMessage::PrePrepare(pre_prepare, requests) = message {
             let requests_bytes = borsh::to_vec(requests).unwrap();
             pre_prepare.digest = self.context.digest(&requests_bytes);
         }
-        let bytes = borsh::to_vec(&message).unwrap();
+        let bytes = borsh::to_vec(message).unwrap();
         let sig = self.context.sign(&bytes);
         (bytes, sig)
     }
