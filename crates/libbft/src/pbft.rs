@@ -60,11 +60,8 @@ pub mod events {
     }
 }
 
-pub struct PbftNode<C: core::PbftCoreContext>
-where
-    C::Sig: Send,
-{
-    core: core::PbftCore<PbftCoreContextState<C::Sig>>,
+pub struct PbftNode<C: core::PbftCoreCryptoContext> {
+    core: core::PbftCore<PbftCoreContextState<C>>,
 
     request_tx: Sender<core::PbftRequest>,
     request_rx: Receiver<core::PbftRequest>,
@@ -74,14 +71,14 @@ where
     loopback_rx: Receiver<(core::PbftMessage, C::Sig)>,
 }
 
-pub struct PbftCoreContextState<S> {
+pub struct PbftCoreContextState<C: core::PbftCoreCryptoContext> {
     message_tx: Option<Sender<(Recipient, core::PbftMessage)>>, // crypto verify worker
     deliver_tx: Option<Sender<(Vec<core::PbftRequest>, core::ViewNum)>>, //
 
-    _sig: std::marker::PhantomData<S>,
+    _crypto: std::marker::PhantomData<C>,
 }
 
-impl<C: core::PbftCoreContext> PbftNode<C> {
+impl<C: core::PbftCoreCryptoContext> PbftNode<C> {
     pub fn new(config: core::PbftCoreConfig) -> Self {
         let (request_tx, request_rx) = channel(1000);
         let (signed_message_tx, signed_message_rx) = channel(1000);
@@ -89,7 +86,7 @@ impl<C: core::PbftCoreContext> PbftNode<C> {
         let core_context = PbftCoreContextState {
             message_tx: None,
             deliver_tx: None,
-            _sig: std::marker::PhantomData,
+            _crypto: std::marker::PhantomData,
         };
         let core = core::PbftCore::new(core_context, config);
         Self {
@@ -115,19 +112,19 @@ impl<C: core::PbftCoreContext> PbftNode<C> {
     }
 }
 
-impl<C: core::PbftCoreContext> Emit<events::SendMessage> for PbftNode<C> {
+impl<C: core::PbftCoreCryptoContext> Emit<events::SendMessage> for PbftNode<C> {
     fn tx_slot(&mut self) -> &mut Option<Sender<<events::SendMessage as crate::Event>::Type>> {
         &mut self.core.context.message_tx
     }
 }
 
-impl<C: core::PbftCoreContext> Emit<events::Deliver> for PbftNode<C> {
+impl<C: core::PbftCoreCryptoContext> Emit<events::Deliver> for PbftNode<C> {
     fn tx_slot(&mut self) -> &mut Option<Sender<<events::Deliver as crate::Event>::Type>> {
         &mut self.core.context.deliver_tx
     }
 }
 
-impl<C: core::PbftCoreContext> PbftNode<C> {
+impl<C: core::PbftCoreCryptoContext> PbftNode<C> {
     pub async fn run(&mut self) {
         let mut interval = interval(Duration::from_millis(100));
         loop {
@@ -149,7 +146,7 @@ impl<C: core::PbftCoreContext> PbftNode<C> {
     }
 }
 
-impl<S: Send> core::PbftCoreContext for PbftCoreContextState<S> {
+impl<C: core::PbftCoreCryptoContext> core::PbftCoreContext for PbftCoreContextState<C> {
     async fn send_message(&mut self, to: core::ReplicaIndex, message: core::PbftMessage) {
         if let Err(err) = self
             .message_tx
@@ -186,7 +183,7 @@ impl<S: Send> core::PbftCoreContext for PbftCoreContextState<S> {
         }
     }
 
-    type Sig = S;
+    type Sig = C::Sig;
 }
 
 pub struct PbftCryptoVerifyWorker<C: core::PbftCoreCryptoContext> {

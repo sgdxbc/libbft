@@ -47,7 +47,7 @@ pub trait PbftCoreContext {
         view_num: ViewNum,
     ) -> impl Future<Output = ()> + Send;
 
-    type Sig: Send;
+    type Sig;
 }
 
 #[derive(Debug, BorshSerialize, BorshDeserialize, Clone)]
@@ -409,8 +409,8 @@ impl<C: PbftCoreContext> PbftCore<C> {
     }
 }
 
-pub trait PbftCoreCryptoContext: libbft_crypto::CryptoKit {}
-impl<C: libbft_crypto::CryptoKit> PbftCoreCryptoContext for C {}
+pub trait PbftCoreCryptoContext: libbft_crypto::CryptoKit + Send {}
+impl<C: libbft_crypto::CryptoKit + Send> PbftCoreCryptoContext for C {}
 
 pub struct PbftCoreCrypto<C> {
     context: C,
