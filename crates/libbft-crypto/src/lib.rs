@@ -1,7 +1,7 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 
 pub trait CryptoKit {
-    type Sig;
+    type Sig: Sig;
 
     fn sign(&self, bytes: &[u8]) -> Self::Sig;
 
@@ -13,6 +13,14 @@ pub trait CryptoKit {
     ) -> anyhow::Result<()>;
 
     fn digest(&self, bytes: &[u8]) -> Digest;
+}
+
+pub trait Sig {
+    fn bytes_len() -> usize;
+
+    fn from_bytes(bytes: &[u8]) -> Self;
+
+    fn as_bytes(&self) -> &[u8];
 }
 
 pub type ReplicaIndex = u8;
@@ -46,5 +54,19 @@ impl CryptoKit for DummyCrypto {
         _replica_index: ReplicaIndex,
     ) -> anyhow::Result<()> {
         Ok(())
+    }
+}
+
+impl Sig for () {
+    fn bytes_len() -> usize {
+        0
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Self {
+        assert!(bytes.is_empty(), "Expected empty bytes for unit sig");
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &[]
     }
 }

@@ -6,7 +6,8 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.102"
 borsh = { version = "1.6.1", features = ["derive"] }
+bytes = "1.11.1"
 derive-where = "1.6.1"
 libbft-crypto = { version = "0.1.0", path = "../libbft-crypto" }
-tokio = { version = "1.51.1", features = ["sync"] }
+tokio = { version = "1.51.1", features = ["macros", "sync"] }
 tracing = "0.1.44"

@@ -46,14 +46,11 @@ pub trait PbftCoreContext {
         view_num: ViewNum,
     ) -> impl Future<Output = ()> + Send;
 
-    type Sig;
+    type Sig: Send;
 }
 
 #[derive(Debug, BorshSerialize, BorshDeserialize, Clone)]
 pub struct PbftRequest(ClientAddr, ClientSeqNum, Vec<u8>);
-
-#[derive(Debug, BorshSerialize, BorshDeserialize)]
-pub struct PbftReply(ClientSeqNum, Vec<u8>, ViewNum);
 
 #[derive(Debug, BorshSerialize, BorshDeserialize)]
 pub enum PbftMessage {
@@ -96,7 +93,7 @@ impl PbftMessage {
 }
 
 pub struct PbftCore<C: PbftCoreContext> {
-    context: C,
+    pub context: C,
     config: PbftCoreConfig,
     view_num: ViewNum,
     seq_num: SeqNum,
@@ -421,7 +418,7 @@ pub struct PbftCoreCrypto<C> {
 impl<C: PbftCoreCryptoContext> PbftCoreCrypto<C> {
     // TODO avoid redundant serialization on `requests`
 
-    pub fn seal(&self, message: &mut PbftMessage) -> (Vec<u8>, C::Sig) {
+    pub fn sign(&self, message: &mut PbftMessage) -> (Vec<u8>, C::Sig) {
         if let PbftMessage::PrePrepare(pre_prepare, requests) = message {
             let requests_bytes = borsh::to_vec(requests).unwrap();
             pre_prepare.digest = self.context.digest(&requests_bytes);
@@ -431,8 +428,8 @@ impl<C: PbftCoreCryptoContext> PbftCoreCrypto<C> {
         (bytes, sig)
     }
 
-    pub fn unseal(&self, bytes: &[u8], sig: &C::Sig) -> anyhow::Result<PbftMessage> {
-        let message = borsh::from_slice(bytes).unwrap();
+    pub fn verify(&self, bytes: &[u8], sig: &C::Sig) -> anyhow::Result<PbftMessage> {
+        let message = borsh::from_slice(bytes)?;
         match &message {
             PbftMessage::PrePrepare(pre_prepare, requests) => {
                 let requests_bytes = borsh::to_vec(requests).unwrap();
