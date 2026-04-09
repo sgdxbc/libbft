@@ -250,7 +250,7 @@ dependencies = [
  "borsh",
  "bytes",
  "derive-where",
- "libbft-crypto",
+ "hex",
  "tokio",
  "tracing",
 ]
@@ -260,14 +260,14 @@ name = "libbft-crypto"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "borsh",
- "hex",
+ "libbft",
 ]
 
 [[package]]
 name = "libbft-network"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "quinn",
 ]
 

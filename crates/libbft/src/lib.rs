@@ -2,7 +2,9 @@ use std::{any::type_name, collections::HashMap};
 
 use tokio::sync::mpsc::Sender;
 
+pub mod crypto;
 pub mod pbft;
+pub mod types;
 
 pub trait Event {
     type Type;

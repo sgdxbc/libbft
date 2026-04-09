@@ -1,14 +1,13 @@
 use std::{collections::HashMap, time::Duration};
 
 use bytes::Bytes;
-use libbft_crypto::Sig as _;
 use tokio::{
     sync::mpsc::{Receiver, Sender, channel},
     time::interval,
 };
 use tracing::warn;
 
-use crate::{Emit, EmitMap, pbft::events::Recipient};
+use crate::{Emit, EmitMap, crypto::Sig as _, pbft::events::Recipient};
 
 mod core;
 #[cfg(test)]

@@ -7,12 +7,14 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use tokio::time::Instant;
 use tracing::{info, warn};
 
-pub type ReplicaIndex = u8;
+use crate::crypto::CryptoKit;
+
+pub type ReplicaIndex = crate::types::ReplicaIndex;
 pub type ClientAddr = SocketAddr;
 pub type ClientSeqNum = u64;
 pub type ViewNum = u64;
 pub type SeqNum = u64;
-pub type Digest = libbft_crypto::Digest;
+pub type Digest = crate::crypto::Digest;
 
 pub struct PbftParams {
     num_replicas: usize,
@@ -409,8 +411,8 @@ impl<C: PbftCoreContext> PbftCore<C> {
     }
 }
 
-pub trait PbftCoreCryptoContext: libbft_crypto::CryptoKit + Send {}
-impl<C: libbft_crypto::CryptoKit + Send> PbftCoreCryptoContext for C {}
+pub trait PbftCoreCryptoContext: CryptoKit + Send {}
+impl<C: CryptoKit + Send> PbftCoreCryptoContext for C {}
 
 pub struct PbftCoreCrypto<C> {
     context: C,
