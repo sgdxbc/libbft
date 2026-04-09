@@ -90,8 +90,17 @@ dependencies = [
  "anyhow",
  "borsh",
  "derive-where",
- "hex",
+ "libbft-crypto",
  "tracing",
+]
+
+[[package]]
+name = "libbft-crypto"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "borsh",
+ "hex",
 ]
 
 [[package]]

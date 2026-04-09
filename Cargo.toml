@@ -1,4 +1,5 @@
 [workspace]
+resolver = "3"
 members = [
-    "crates/libbft",
+    "crates/libbft", "crates/libbft-crypto",
 ]
