@@ -7,7 +7,11 @@ use tokio::{
 };
 use tracing::warn;
 
-use crate::{Emit, EmitMap, crypto::Sig as _, pbft::events::Recipient};
+use crate::{
+    crypto::Sig as _,
+    event::{Emit, EmitMap},
+    pbft::events::Recipient,
+};
 
 mod core;
 #[cfg(test)]
@@ -16,7 +20,7 @@ mod tests;
 pub mod events {
     use bytes::Bytes;
 
-    use crate::{Event, pbft::core};
+    use crate::{event::Event, pbft::core};
 
     pub struct HandleRequest;
     impl Event for HandleRequest {
@@ -112,13 +116,15 @@ impl<C: core::PbftCoreCryptoContext> PbftNode<C> {
 }
 
 impl<C: core::PbftCoreCryptoContext> Emit<events::SendMessage> for PbftNode<C> {
-    fn tx_slot(&mut self) -> &mut Option<Sender<<events::SendMessage as crate::Event>::Type>> {
+    fn tx_slot(
+        &mut self,
+    ) -> &mut Option<Sender<<events::SendMessage as crate::event::Event>::Type>> {
         &mut self.core.context.message_tx
     }
 }
 
 impl<C: core::PbftCoreCryptoContext> Emit<events::Deliver> for PbftNode<C> {
-    fn tx_slot(&mut self) -> &mut Option<Sender<<events::Deliver as crate::Event>::Type>> {
+    fn tx_slot(&mut self) -> &mut Option<Sender<<events::Deliver as crate::event::Event>::Type>> {
         &mut self.core.context.deliver_tx
     }
 }
@@ -214,7 +220,7 @@ impl<C: core::PbftCoreCryptoContext> Emit<events::SignedMessage<C::Sig>>
 {
     fn tx_slot(
         &mut self,
-    ) -> &mut Option<Sender<<events::SignedMessage<C::Sig> as crate::Event>::Type>> {
+    ) -> &mut Option<Sender<<events::SignedMessage<C::Sig> as crate::event::Event>::Type>> {
         &mut self.signed_message_tx
     }
 }
@@ -283,8 +289,9 @@ impl<C: core::PbftCoreCryptoContext> EmitMap<core::ReplicaIndex, events::SendByt
 {
     fn tx_map_slot(
         &mut self,
-    ) -> &mut Option<HashMap<core::ReplicaIndex, Sender<<events::SendBytes as crate::Event>::Type>>>
-    {
+    ) -> &mut Option<
+        HashMap<core::ReplicaIndex, Sender<<events::SendBytes as crate::event::Event>::Type>>,
+    > {
         &mut self.bytes_tx_map
     }
 }
@@ -294,7 +301,7 @@ impl<C: core::PbftCoreCryptoContext> Emit<events::LoopbackMessage<C::Sig>>
 {
     fn tx_slot(
         &mut self,
-    ) -> &mut Option<Sender<<events::LoopbackMessage<C::Sig> as crate::Event>::Type>> {
+    ) -> &mut Option<Sender<<events::LoopbackMessage<C::Sig> as crate::event::Event>::Type>> {
         &mut self.loopback_tx
     }
 }
