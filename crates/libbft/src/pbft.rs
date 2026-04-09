@@ -8,9 +8,57 @@ use tokio::{
 };
 use tracing::warn;
 
+use crate::{Emit, EmitMap, pbft::events::Recipient};
+
 mod core;
 #[cfg(test)]
 mod tests;
+
+pub mod events {
+    use bytes::Bytes;
+
+    use crate::{Event, pbft::core};
+
+    pub struct HandleRequest;
+    impl Event for HandleRequest {
+        type Type = core::PbftRequest;
+    }
+
+    pub struct SignedMessage<S>(std::marker::PhantomData<S>);
+    impl<S> Event for SignedMessage<S> {
+        type Type = (core::PbftMessage, S);
+    }
+
+    pub struct LoopbackMessage<S>(std::marker::PhantomData<S>);
+    impl<S> Event for LoopbackMessage<S> {
+        type Type = (core::PbftMessage, S);
+    }
+
+    pub enum Recipient {
+        To(core::ReplicaIndex),
+        Broadcast,
+    }
+
+    pub struct SendMessage;
+    impl Event for SendMessage {
+        type Type = (Recipient, core::PbftMessage);
+    }
+
+    pub struct Deliver;
+    impl Event for Deliver {
+        type Type = (Vec<core::PbftRequest>, core::ViewNum);
+    }
+
+    pub struct HandleBytes;
+    impl Event for HandleBytes {
+        type Type = Vec<u8>;
+    }
+
+    pub struct SendBytes;
+    impl Event for SendBytes {
+        type Type = Bytes;
+    }
+}
 
 pub struct PbftNode<C: core::PbftCoreContext>
 where
@@ -31,11 +79,6 @@ pub struct PbftCoreContextState<S> {
     deliver_tx: Option<Sender<(Vec<core::PbftRequest>, core::ViewNum)>>, //
 
     _sig: std::marker::PhantomData<S>,
-}
-
-pub enum Recipient {
-    To(core::ReplicaIndex),
-    Broadcast,
 }
 
 impl<C: core::PbftCoreContext> PbftNode<C> {
@@ -60,25 +103,31 @@ impl<C: core::PbftCoreContext> PbftNode<C> {
         }
     }
 
-    pub fn register<Ctx: core::PbftCoreCryptoContext<Sig = C::Sig>>(
+    pub fn register(
         &self,
-        verify_worker: &mut PbftCryptoVerifyWorker<Ctx>,
-        sign_worker: &mut PbftCryptoSignWorker<Ctx>,
+        emit_request: &mut impl Emit<events::HandleRequest>,
+        emit_signed_message: &mut impl Emit<events::SignedMessage<C::Sig>>,
+        emit_loopback_message: &mut impl Emit<events::LoopbackMessage<C::Sig>>,
     ) {
-        verify_worker.set_signed_message_tx(self.signed_message_tx.clone());
-        sign_worker.set_loopback_tx(self.loopback_tx.clone());
+        emit_request.set_tx(self.request_tx.clone());
+        emit_signed_message.set_tx(self.signed_message_tx.clone());
+        emit_loopback_message.set_tx(self.loopback_tx.clone());
     }
+}
 
-    fn set_message_tx(&mut self, message_tx: Sender<(Recipient, core::PbftMessage)>) {
-        let replaced = self.core.context.message_tx.replace(message_tx);
-        assert!(replaced.is_none(), "message_tx can only be set once");
+impl<C: core::PbftCoreContext> Emit<events::SendMessage> for PbftNode<C> {
+    fn tx_slot(&mut self) -> &mut Option<Sender<<events::SendMessage as crate::Event>::Type>> {
+        &mut self.core.context.message_tx
     }
+}
 
-    pub fn set_deliver_tx(&mut self, deliver_tx: Sender<(Vec<core::PbftRequest>, core::ViewNum)>) {
-        let replaced = self.core.context.deliver_tx.replace(deliver_tx);
-        assert!(replaced.is_none(), "deliver_tx can only be set once");
+impl<C: core::PbftCoreContext> Emit<events::Deliver> for PbftNode<C> {
+    fn tx_slot(&mut self) -> &mut Option<Sender<<events::Deliver as crate::Event>::Type>> {
+        &mut self.core.context.deliver_tx
     }
+}
 
+impl<C: core::PbftCoreContext> PbftNode<C> {
     pub async fn run(&mut self) {
         let mut interval = interval(Duration::from_millis(100));
         loop {
@@ -159,11 +208,22 @@ impl<C: core::PbftCoreCryptoContext> PbftCryptoVerifyWorker<C> {
         }
     }
 
-    fn set_signed_message_tx(&mut self, signed_message_tx: Sender<(core::PbftMessage, C::Sig)>) {
-        let replaced = self.signed_message_tx.replace(signed_message_tx);
-        assert!(replaced.is_none(), "signed_message_tx can only be set once");
+    pub fn register(&mut self, emit_handle_bytes: &mut impl Emit<events::HandleBytes>) {
+        emit_handle_bytes.set_tx(self.bytes_tx.clone());
     }
+}
 
+impl<C: core::PbftCoreCryptoContext> Emit<events::SignedMessage<C::Sig>>
+    for PbftCryptoVerifyWorker<C>
+{
+    fn tx_slot(
+        &mut self,
+    ) -> &mut Option<Sender<<events::SignedMessage<C::Sig> as crate::Event>::Type>> {
+        &mut self.signed_message_tx
+    }
+}
+
+impl<C: core::PbftCoreCryptoContext> PbftCryptoVerifyWorker<C> {
     pub async fn run(&mut self) {
         while let Some(bytes) = self.bytes_rx.recv().await {
             let Some((message_bytes, sig_bytes)) =
@@ -214,20 +274,36 @@ impl<C: core::PbftCoreCryptoContext> PbftCryptoSignWorker<C> {
         }
     }
 
-    pub fn register<Ctx: core::PbftCoreContext>(&mut self, node: &mut PbftNode<Ctx>) {
-        node.set_message_tx(self.message_tx.clone());
+    pub fn register<Ctx: core::PbftCoreContext>(
+        &mut self,
+        emit_send_message: &mut impl Emit<events::SendMessage>,
+    ) {
+        emit_send_message.set_tx(self.message_tx.clone());
     }
+}
 
-    pub fn set_bytes_tx_map(&mut self, bytes_tx_map: HashMap<core::ReplicaIndex, Sender<Bytes>>) {
-        let replaced = self.bytes_tx_map.replace(bytes_tx_map);
-        assert!(replaced.is_none(), "bytes_tx_map can only be set once");
+impl<C: core::PbftCoreCryptoContext> EmitMap<core::ReplicaIndex, events::SendBytes>
+    for PbftCryptoSignWorker<C>
+{
+    fn tx_map_slot(
+        &mut self,
+    ) -> &mut Option<HashMap<core::ReplicaIndex, Sender<<events::SendBytes as crate::Event>::Type>>>
+    {
+        &mut self.bytes_tx_map
     }
+}
 
-    fn set_loopback_tx(&mut self, loopback_tx: Sender<(core::PbftMessage, C::Sig)>) {
-        let replaced = self.loopback_tx.replace(loopback_tx);
-        assert!(replaced.is_none(), "loopback_tx can only be set once");
+impl<C: core::PbftCoreCryptoContext> Emit<events::LoopbackMessage<C::Sig>>
+    for PbftCryptoSignWorker<C>
+{
+    fn tx_slot(
+        &mut self,
+    ) -> &mut Option<Sender<<events::LoopbackMessage<C::Sig> as crate::Event>::Type>> {
+        &mut self.loopback_tx
     }
+}
 
+impl<C: core::PbftCoreCryptoContext> PbftCryptoSignWorker<C> {
     pub async fn run(&mut self) {
         while let Some((recipient, mut message)) = self.message_rx.recv().await {
             let (mut bytes, sig) = self.core_crypto.sign(&mut message);
