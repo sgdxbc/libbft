@@ -33,7 +33,7 @@ pub trait PbftCoreContext {
     fn send_message(&mut self, to: ReplicaIndex, message: PbftMessage);
 
     // sign `message` and broadcast message along with the signature, and call
-    // `handle_loopback_broadcast_message` with the message and signature
+    // `handle_loopback_message` with the message and signature
     fn broadcast_message(&mut self, message: PbftMessage);
 
     fn deliver(&mut self, requests: Vec<PbftRequest>, view_num: ViewNum);
@@ -164,22 +164,6 @@ impl<C: PbftCoreContext> PbftCore<C> {
         }
     }
 
-    fn close_batch(&mut self) {
-        self.seq_num += 1;
-        let digest = Default::default(); // will be filled by crypto worker
-        let pre_prepare = PrePrepare {
-            view_num: self.view_num,
-            seq_num: self.seq_num,
-            digest,
-        };
-        let requests = self
-            .pending_requests
-            .drain(..self.pending_requests.len().min(self.config.max_block_size))
-            .collect();
-        self.context
-            .broadcast_message(PbftMessage::PrePrepare(pre_prepare, requests));
-    }
-
     // should call with verified messages and their signatures
     pub fn handle_message(&mut self, message: PbftMessage, sig: C::Sig) {
         if message.view_num() != self.view_num {
@@ -199,7 +183,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
 
     // trusted loopback messages that may be processed differently or bypass some further validation
     // compared to verified remote messages
-    pub fn handle_loopback_broadcast_message(&mut self, message: PbftMessage, sig: C::Sig) {
+    pub fn handle_loopback_message(&mut self, message: PbftMessage, sig: C::Sig) {
         if message.view_num() != self.view_num {
             return;
         }
@@ -233,6 +217,26 @@ impl<C: PbftCoreContext> PbftCore<C> {
                 self.insert_commit(commit, sig)
             }
         }
+    }
+
+    pub fn tick(&mut self) {
+        //
+    }
+
+    fn close_batch(&mut self) {
+        self.seq_num += 1;
+        let digest = Default::default(); // will be filled by crypto worker
+        let pre_prepare = PrePrepare {
+            view_num: self.view_num,
+            seq_num: self.seq_num,
+            digest,
+        };
+        let requests = self
+            .pending_requests
+            .drain(..self.pending_requests.len().min(self.config.max_block_size))
+            .collect();
+        self.context
+            .broadcast_message(PbftMessage::PrePrepare(pre_prepare, requests));
     }
 
     fn handle_pre_prepare(
@@ -400,21 +404,21 @@ pub struct PbftCrypto<C> {
 }
 
 impl<C: PbftCryptoContext> PbftCrypto<C> {
-    pub fn sign(&self, message: &mut PbftMessage) -> C::Sig {
-        match message {
-            PbftMessage::PrePrepare(pre_prepare, requests) => {
-                let requests_bytes = borsh::to_vec(requests).unwrap();
-                pre_prepare.digest = self.context.digest(&requests_bytes);
-                let bytes = borsh::to_vec(pre_prepare).unwrap();
-                self.context.sign(&bytes)
-            }
-            PbftMessage::Prepare(prepare) => self.context.sign(&borsh::to_vec(prepare).unwrap()),
-            PbftMessage::Commit(commit) => self.context.sign(&borsh::to_vec(commit).unwrap()),
+    // TODO avoid redundant serialization on `requests`
+
+    pub fn seal(&self, mut message: PbftMessage) -> (Vec<u8>, C::Sig) {
+        if let PbftMessage::PrePrepare(pre_prepare, requests) = &mut message {
+            let requests_bytes = borsh::to_vec(requests).unwrap();
+            pre_prepare.digest = self.context.digest(&requests_bytes);
         }
+        let bytes = borsh::to_vec(&message).unwrap();
+        let sig = self.context.sign(&bytes);
+        (bytes, sig)
     }
 
-    pub fn verify(&self, message: &PbftMessage, sig: &C::Sig) -> anyhow::Result<()> {
-        match message {
+    pub fn unseal(&self, bytes: &[u8], sig: &C::Sig) -> anyhow::Result<PbftMessage> {
+        let message = borsh::from_slice(bytes).unwrap();
+        match &message {
             PbftMessage::PrePrepare(pre_prepare, requests) => {
                 let requests_bytes = borsh::to_vec(requests).unwrap();
                 let expected_digest = self.context.digest(&requests_bytes);
@@ -424,20 +428,14 @@ impl<C: PbftCryptoContext> PbftCrypto<C> {
                     expected_digest,
                     pre_prepare.digest
                 );
-                self.context.verify(
-                    &borsh::to_vec(pre_prepare).unwrap(),
-                    sig,
-                    self.params.view_leader(pre_prepare.view_num),
-                )
+                self.context
+                    .verify(bytes, sig, self.params.view_leader(pre_prepare.view_num))?
             }
             PbftMessage::Prepare(prepare) => {
-                self.context
-                    .verify(&borsh::to_vec(prepare).unwrap(), sig, prepare.replica_index)
+                self.context.verify(bytes, sig, prepare.replica_index)?
             }
-            PbftMessage::Commit(commit) => {
-                self.context
-                    .verify(&borsh::to_vec(commit).unwrap(), sig, commit.replica_index)
-            }
+            PbftMessage::Commit(commit) => self.context.verify(bytes, sig, commit.replica_index)?,
         }
+        Ok(message)
     }
 }
