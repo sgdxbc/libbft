@@ -5,7 +5,7 @@ use std::{
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use tokio::time::Instant;
-use tracing::{info, warn};
+use tracing::{info, instrument, warn};
 
 use crate::crypto::CryptoKit;
 
@@ -161,6 +161,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
         }
     }
 
+    #[instrument(skip(self), fields(replica_index = self.config.replica_index))]
     pub async fn handle_request(&mut self, request: PbftRequest) {
         if !self.config.is_view_leader(self.view_num) {
             // TODO set timer
@@ -173,6 +174,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
     }
 
     // should call with verified messages and their signatures
+    #[instrument(skip(self, sig), fields(replica_index = self.config.replica_index))]
     pub async fn handle_message(&mut self, message: PbftMessage, sig: C::Sig) {
         if message.view_num() != self.view_num {
             if message.view_num() > self.view_num {
@@ -191,6 +193,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
 
     // trusted loopback messages that may be processed differently or bypass some further validation
     // compared to verified remote messages
+    #[instrument(skip(self, sig), fields(replica_index = self.config.replica_index))]
     pub async fn handle_loopback_message(&mut self, message: PbftMessage, sig: C::Sig) {
         if message.view_num() != self.view_num {
             return;
@@ -227,6 +230,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
         }
     }
 
+    #[instrument(skip(self), fields(replica_index = self.config.replica_index))]
     pub async fn tick(&mut self, now: Instant) {
         let _ = now;
         //
