@@ -266,6 +266,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "libbft-apps"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libbft",
+ "tokio",
+]
+
+[[package]]
 name = "libbft-crypto"
 version = "0.1.0"
 dependencies = [

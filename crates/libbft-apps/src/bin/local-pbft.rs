@@ -11,6 +11,13 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn params() -> PbftParams {
+    PbftParams {
+        num_replicas: 4,
+        num_faulty_replicas: 1,
+    }
+}
+
 async fn run_node(replica_index: ReplicaIndex) -> anyhow::Result<()> {
     let config = PbftCoreConfig {
         params: params(),
@@ -26,12 +33,6 @@ async fn run_node(replica_index: ReplicaIndex) -> anyhow::Result<()> {
     node.register(&mut emit_request, &mut verify_worker, &mut sign_worker);
     verify_worker.register(&mut emit_handle_bytes);
     sign_worker.register(&mut node);
+    tokio::join!(node.run(), verify_worker.run(), sign_worker.run());
     Ok(())
-}
-
-fn params() -> PbftParams {
-    PbftParams {
-        num_replicas: 4,
-        num_faulty_replicas: 1,
-    }
 }
