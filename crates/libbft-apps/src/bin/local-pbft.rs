@@ -14,6 +14,7 @@ use libbft::{
 use opentelemetry::{KeyValue, trace::TracerProvider as _};
 use opentelemetry_sdk::{
     Resource,
+    propagation::TraceContextPropagator,
     trace::{RandomIdGenerator, Sampler, SdkTracerProvider},
 };
 use opentelemetry_semantic_conventions::{
@@ -22,7 +23,7 @@ use opentelemetry_semantic_conventions::{
 };
 use tokio::{sync::mpsc::channel, task::JoinSet};
 use tokio_util::sync::CancellationToken;
-use tracing::Level;
+use tracing::{Level, info_span};
 use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -35,6 +36,7 @@ fn params() -> PbftParams {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
     let tracer_provider = init_tracing_subscriber();
 
     let mut fabric_bytes_rx_vec = Vec::new();
@@ -89,10 +91,11 @@ async fn main() -> anyhow::Result<()> {
         join_set.spawn({
             let token = token.clone();
             async move {
-                while let Some(Some(bytes)) =
+                while let Some(Some((bytes, _span))) =
                     token.run_until_cancelled(fabric_bytes_rx.recv()).await
                 {
-                    if let Err(err) = node_bytes_tx.send(bytes.into()).await {
+                    let span = info_span!("HandleBytes");
+                    if let Err(err) = node_bytes_tx.send((bytes.into(), span)).await {
                         tracing::error!("Failed to send bytes to node {i}: {err:#}");
                     }
                 }
@@ -101,8 +104,9 @@ async fn main() -> anyhow::Result<()> {
     }
     let request_tx = request_tx.unwrap();
     let workload = async move {
+        let span = info_span!("Workload");
         request_tx
-            .send(PbftRequest(b"hello".into()))
+            .send((PbftRequest(b"hello".into()), span))
             .await
             .context("request")?;
         for (i, mut deliver_rx) in deliver_rx_vec.into_iter().enumerate() {

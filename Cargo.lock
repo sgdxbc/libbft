@@ -654,9 +654,11 @@ dependencies = [
  "bytes",
  "derive-where",
  "hex",
+ "opentelemetry",
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-opentelemetry",
 ]
 
 [[package]]

@@ -6,7 +6,7 @@ use tokio::{
     time::interval,
 };
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{Instrument, Span, instrument, warn};
 
 use crate::{
     crypto::Sig as _,
@@ -69,17 +69,17 @@ pub mod events {
 pub struct PbftNode<C: core::PbftCoreCryptoContext> {
     core: core::PbftCore<PbftCoreContextState<C>>,
 
-    request_tx: Sender<core::PbftRequest>,
-    request_rx: Receiver<core::PbftRequest>,
-    signed_message_tx: Sender<(core::PbftMessage, C::Sig)>,
-    signed_message_rx: Receiver<(core::PbftMessage, C::Sig)>,
-    loopback_tx: Sender<(core::PbftMessage, C::Sig)>,
-    loopback_rx: Receiver<(core::PbftMessage, C::Sig)>,
+    request_tx: Sender<(core::PbftRequest, Span)>,
+    request_rx: Receiver<(core::PbftRequest, Span)>,
+    signed_message_tx: Sender<((core::PbftMessage, C::Sig), Span)>,
+    signed_message_rx: Receiver<((core::PbftMessage, C::Sig), Span)>,
+    loopback_tx: Sender<((core::PbftMessage, C::Sig), Span)>,
+    loopback_rx: Receiver<((core::PbftMessage, C::Sig), Span)>,
 }
 
 pub struct PbftCoreContextState<C: core::PbftCoreCryptoContext> {
-    message_tx: Option<Sender<(Recipient, core::PbftMessage)>>, // crypto verify worker
-    deliver_tx: Option<Sender<(Vec<core::PbftRequest>, core::ViewNum)>>, //
+    message_tx: Option<Sender<((Recipient, core::PbftMessage), Span)>>, // crypto verify worker
+    deliver_tx: Option<Sender<((Vec<core::PbftRequest>, core::ViewNum), Span)>>, //
 
     _crypto: std::marker::PhantomData<C>,
 }
@@ -121,13 +121,15 @@ impl<C: core::PbftCoreCryptoContext> PbftNode<C> {
 impl<C: core::PbftCoreCryptoContext> Emit<events::SendMessage> for PbftNode<C> {
     fn tx_slot(
         &mut self,
-    ) -> &mut Option<Sender<<events::SendMessage as crate::event::Event>::Type>> {
+    ) -> &mut Option<Sender<(<events::SendMessage as crate::event::Event>::Type, Span)>> {
         &mut self.core.context.message_tx
     }
 }
 
 impl<C: core::PbftCoreCryptoContext> Emit<events::Deliver> for PbftNode<C> {
-    fn tx_slot(&mut self) -> &mut Option<Sender<<events::Deliver as crate::event::Event>::Type>> {
+    fn tx_slot(
+        &mut self,
+    ) -> &mut Option<Sender<(<events::Deliver as crate::event::Event>::Type, Span)>> {
         &mut self.core.context.deliver_tx
     }
 }
@@ -141,14 +143,14 @@ impl<C: core::PbftCoreCryptoContext> PbftNode<C> {
                     break;
                 }
 
-                Some(request) = self.request_rx.recv() => {
-                    self.core.handle_request(request).await;
+                Some((request, span)) = self.request_rx.recv() => {
+                    self.core.handle_request(request).instrument(span).await;
                 }
-                Some((message, sig)) = self.signed_message_rx.recv() => {
-                    self.core.handle_message(message, sig).await;
+                Some(((message, sig), span)) = self.signed_message_rx.recv() => {
+                    self.core.handle_message(message, sig).instrument(span).await;
                 }
-                Some((message, sig)) = self.loopback_rx.recv() => {
-                    self.core.handle_loopback_message(message, sig).await;
+                Some(((message, sig), span)) = self.loopback_rx.recv() => {
+                    self.core.handle_loopback_message(message, sig).instrument(span).await;
                 }
                 now = interval.tick() => {
                     self.core.tick(now).await;
@@ -164,7 +166,8 @@ impl<C: core::PbftCoreCryptoContext> core::PbftCoreContext for PbftCoreContextSt
             .message_tx
             .as_ref()
             .unwrap()
-            .send((Recipient::To(to), message))
+            // ideally we should use the "lifecycle" span here to create sibling spans for pipeline
+            .send(((Recipient::To(to), message), Span::current()))
             .await
         {
             warn!("Failed to send message to crypto verify worker: {err:#}");
@@ -176,7 +179,7 @@ impl<C: core::PbftCoreCryptoContext> core::PbftCoreContext for PbftCoreContextSt
             .message_tx
             .as_ref()
             .unwrap()
-            .send((Recipient::Broadcast, message))
+            .send(((Recipient::Broadcast, message), Span::current()))
             .await
         {
             warn!("Failed to send message to crypto verify worker: {err:#}");
@@ -188,7 +191,7 @@ impl<C: core::PbftCoreCryptoContext> core::PbftCoreContext for PbftCoreContextSt
             .deliver_tx
             .as_ref()
             .unwrap()
-            .send((requests, view_num))
+            .send(((requests, view_num), Span::current()))
             .await
         {
             warn!("Failed to deliver requests: {err:#}");
@@ -201,9 +204,9 @@ impl<C: core::PbftCoreCryptoContext> core::PbftCoreContext for PbftCoreContextSt
 pub struct PbftCryptoVerifyWorker<C: core::PbftCoreCryptoContext> {
     core_crypto: core::PbftCoreCrypto<C>,
 
-    bytes_tx: Sender<Vec<u8>>,
-    bytes_rx: Receiver<Vec<u8>>,
-    signed_message_tx: Option<Sender<(core::PbftMessage, C::Sig)>>, // node
+    bytes_tx: Sender<(Vec<u8>, Span)>,
+    bytes_rx: Receiver<(Vec<u8>, Span)>,
+    signed_message_tx: Option<Sender<((core::PbftMessage, C::Sig), Span)>>, // node
 }
 
 impl<C: core::PbftCoreCryptoContext> PbftCryptoVerifyWorker<C> {
@@ -227,21 +230,27 @@ impl<C: core::PbftCoreCryptoContext> Emit<events::SignedMessage<C::Sig>>
 {
     fn tx_slot(
         &mut self,
-    ) -> &mut Option<Sender<<events::SignedMessage<C::Sig> as crate::event::Event>::Type>> {
+    ) -> &mut Option<
+        Sender<(
+            <events::SignedMessage<C::Sig> as crate::event::Event>::Type,
+            Span,
+        )>,
+    > {
         &mut self.signed_message_tx
     }
 }
 
 impl<C: core::PbftCoreCryptoContext> PbftCryptoVerifyWorker<C> {
     pub async fn run(&mut self, token: &CancellationToken) {
-        while let Some(Some(bytes)) = token.run_until_cancelled(self.bytes_rx.recv()).await {
-            match self.decode(&bytes) {
+        while let Some(Some((bytes, span))) = token.run_until_cancelled(self.bytes_rx.recv()).await
+        {
+            match span.in_scope(|| self.decode(&bytes)) {
                 Ok((message, sig)) => {
                     if let Err(err) = self
                         .signed_message_tx
                         .as_ref()
                         .unwrap()
-                        .send((message, sig))
+                        .send(((message, sig), span))
                         .await
                     {
                         warn!("Failed to send verified message to node: {err:#}");
@@ -252,6 +261,7 @@ impl<C: core::PbftCoreCryptoContext> PbftCryptoVerifyWorker<C> {
         }
     }
 
+    #[instrument(skip_all)]
     fn decode(&self, bytes: &[u8]) -> anyhow::Result<(core::PbftMessage, C::Sig)> {
         anyhow::ensure!(
             bytes.len() >= 4,
@@ -273,10 +283,10 @@ impl<C: core::PbftCoreCryptoContext> PbftCryptoVerifyWorker<C> {
 pub struct PbftCryptoSignWorker<C: core::PbftCoreCryptoContext> {
     core_crypto: core::PbftCoreCrypto<C>,
 
-    message_tx: Sender<(Recipient, core::PbftMessage)>,
-    message_rx: Receiver<(Recipient, core::PbftMessage)>,
-    bytes_tx_map: Option<HashMap<core::ReplicaIndex, Sender<Bytes>>>, // network
-    loopback_tx: Option<Sender<(core::PbftMessage, C::Sig)>>,         // node
+    message_tx: Sender<((Recipient, core::PbftMessage), Span)>,
+    message_rx: Receiver<((Recipient, core::PbftMessage), Span)>,
+    bytes_tx_map: Option<HashMap<core::ReplicaIndex, Sender<(Bytes, Span)>>>, // network
+    loopback_tx: Option<Sender<((core::PbftMessage, C::Sig), Span)>>,         // node
 }
 
 impl<C: core::PbftCoreCryptoContext> PbftCryptoSignWorker<C> {
@@ -302,7 +312,10 @@ impl<C: core::PbftCoreCryptoContext> EmitMap<core::ReplicaIndex, events::SendByt
     fn tx_map_slot(
         &mut self,
     ) -> &mut Option<
-        HashMap<core::ReplicaIndex, Sender<<events::SendBytes as crate::event::Event>::Type>>,
+        HashMap<
+            core::ReplicaIndex,
+            Sender<(<events::SendBytes as crate::event::Event>::Type, Span)>,
+        >,
     > {
         &mut self.bytes_tx_map
     }
@@ -313,14 +326,19 @@ impl<C: core::PbftCoreCryptoContext> Emit<events::LoopbackMessage<C::Sig>>
 {
     fn tx_slot(
         &mut self,
-    ) -> &mut Option<Sender<<events::LoopbackMessage<C::Sig> as crate::event::Event>::Type>> {
+    ) -> &mut Option<
+        Sender<(
+            <events::LoopbackMessage<C::Sig> as crate::event::Event>::Type,
+            Span,
+        )>,
+    > {
         &mut self.loopback_tx
     }
 }
 
 impl<C: core::PbftCoreCryptoContext> PbftCryptoSignWorker<C> {
     pub async fn run(&mut self, token: &CancellationToken) {
-        while let Some(Some((recipient, mut message))) =
+        while let Some(Some(((recipient, mut message), span))) =
             token.run_until_cancelled(self.message_rx.recv()).await
         {
             let (bytes, sig, piggyback_data) = self.core_crypto.sign(&mut message);
@@ -334,13 +352,16 @@ impl<C: core::PbftCoreCryptoContext> PbftCryptoSignWorker<C> {
             .into();
             match recipient {
                 Recipient::To(to) => {
-                    if let Err(err) = self.bytes_tx_map.as_ref().unwrap()[&to].send(bytes).await {
+                    if let Err(err) = self.bytes_tx_map.as_ref().unwrap()[&to]
+                        .send((bytes, span))
+                        .await
+                    {
                         warn!("Failed to send message to node {to}: {err:#}");
                     }
                 }
                 Recipient::Broadcast => {
                     for (to, bytes_tx) in self.bytes_tx_map.as_ref().unwrap() {
-                        if let Err(err) = bytes_tx.send(bytes.clone()).await {
+                        if let Err(err) = bytes_tx.send((bytes.clone(), span.clone())).await {
                             warn!("Failed to broadcast message to node {to}: {err:#}");
                         }
                     }
@@ -348,7 +369,7 @@ impl<C: core::PbftCoreCryptoContext> PbftCryptoSignWorker<C> {
                         .loopback_tx
                         .as_ref()
                         .unwrap()
-                        .send((message, sig))
+                        .send(((message, sig), span))
                         .await
                     {
                         warn!("Failed to loopback signed message: {err:#}");
