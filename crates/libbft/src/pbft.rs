@@ -247,19 +247,11 @@ impl<C: workers::PbftCryptoContext> PbftIngressWorker<C> {
 
     #[instrument(skip_all)]
     fn decode(&self, bytes: &[u8]) -> anyhow::Result<(core::PbftMessage, C::Sig)> {
-        anyhow::ensure!(
-            bytes.len() >= 4,
-            "Received bytes too short to contain data length"
-        );
-        let data_len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
-        let Some((bytes, piggyback_data)) = &bytes[4..].split_at_checked(data_len) else {
-            anyhow::bail!("Received bytes too short to contain data");
-        };
         let Some((sig_bytes, data_bytes)) = bytes.split_at_checked(C::Sig::bytes_len()) else {
             anyhow::bail!("Received bytes too short to contain signature");
         };
         let sig = C::Sig::from_bytes(sig_bytes);
-        let message = self.state.egress(data_bytes, &sig, piggyback_data)?;
+        let message = self.state.ingress(data_bytes, &sig)?;
         Ok((message, sig))
     }
 }
@@ -311,15 +303,8 @@ impl<C: workers::PbftCryptoContext> PbftEgressWorker<C> {
         while let Some(Some(((recipient, mut message), span))) =
             token.run_until_cancelled(self.message_rx.recv()).await
         {
-            let (bytes, sig, piggyback_data) = self.state.ingress(&mut message);
-            let data_bytes = [sig.as_bytes(), &bytes].concat();
-            let bytes = [
-                &(data_bytes.len() as u32).to_le_bytes()[..],
-                &data_bytes,
-                &piggyback_data,
-            ]
-            .concat()
-            .into();
+            let (data_bytes, sig) = self.state.egress(&mut message);
+            let bytes = [sig.as_bytes(), &data_bytes].concat().into();
             match recipient {
                 Recipient::To(to) => {
                     if let Err(err) = self.bytes_tx_map.as_ref().unwrap()[&to]
