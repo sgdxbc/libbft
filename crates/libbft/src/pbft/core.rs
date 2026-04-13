@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, hash_map::Entry},
-    net::SocketAddr,
-};
+use std::collections::{HashMap, hash_map::Entry};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use tokio::time::Instant;
@@ -10,8 +7,6 @@ use tracing::{info, instrument, warn};
 use crate::crypto::CryptoKit;
 
 pub type ReplicaIndex = crate::types::ReplicaIndex;
-pub type ClientAddr = SocketAddr;
-pub type ClientSeqNum = u64;
 pub type ViewNum = u64;
 pub type SeqNum = u64;
 pub type Digest = crate::crypto::Digest;
@@ -53,7 +48,7 @@ pub trait PbftCoreContext {
 }
 
 #[derive(Debug, BorshSerialize, BorshDeserialize, Clone)]
-pub struct PbftRequest(ClientAddr, ClientSeqNum, Vec<u8>);
+pub struct PbftRequest(pub Vec<u8>);
 
 #[derive(Debug, BorshSerialize, BorshDeserialize)]
 pub enum PbftMessage {
@@ -212,16 +207,20 @@ impl<C: PbftCoreContext> PbftCore<C> {
                 assert!(replaced.is_none());
             }
             PbftMessage::Prepare(prepare) => {
-                if let Some(slot) = self.log.get(&prepare.seq_num)
-                    && self.config.params.slot_prepared(slot)
+                if self
+                    .config
+                    .params
+                    .slot_prepared(&self.log[&prepare.seq_num])
                 {
                     return;
                 }
                 self.insert_prepare(prepare, sig).await
             }
             PbftMessage::Commit(commit) => {
-                if let Some(slot) = self.log.get(&commit.seq_num)
-                    && self.config.params.slot_committed(slot)
+                if self
+                    .config
+                    .params
+                    .slot_committed(&self.log[&commit.seq_num])
                 {
                     return;
                 }

@@ -1,42 +1,30 @@
+use std::collections::HashMap;
+
+use anyhow::Context;
 use libbft::{
     crypto::DummyCrypto,
-    pbft::{PbftCoreConfig, PbftCryptoSignWorker, PbftCryptoVerifyWorker, PbftNode, PbftParams},
+    event::{Emit, EmitMap},
+    pbft::{
+        PbftCoreConfig, PbftCryptoSignWorker, PbftCryptoVerifyWorker, PbftNode, PbftParams,
+        PbftRequest,
+        events::{Deliver, SendBytes},
+    },
     types::ReplicaIndex,
 };
-use opentelemetry::{KeyValue, global, trace::TracerProvider as _};
+use opentelemetry::{KeyValue, trace::TracerProvider as _};
 use opentelemetry_sdk::{
     Resource,
-    metrics::{MeterProviderBuilder, PeriodicReader, SdkMeterProvider},
     trace::{RandomIdGenerator, Sampler, SdkTracerProvider},
 };
 use opentelemetry_semantic_conventions::{
     SCHEMA_URL,
-    // attribute::{DEPLOYMENT_ENVIRONMENT_NAME, SERVICE_VERSION},
-    attribute::SERVICE_VERSION,
+    attribute::{DEPLOYMENT_ENVIRONMENT_NAME, SERVICE_VERSION},
 };
-use tokio::sync::mpsc::Sender;
+use tokio::{sync::mpsc::channel, task::JoinSet};
+use tokio_util::sync::CancellationToken;
 use tracing::Level;
-use tracing_opentelemetry::{MetricsLayer, OpenTelemetryLayer};
+use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-#[tokio::main]
-async fn main() {
-    let _guard = init_tracing_subscriber();
-
-    foo().await;
-}
-
-#[tracing::instrument]
-async fn foo() {
-    tracing::info!(
-        monotonic_counter.foo = 1_u64,
-        key_1 = "bar",
-        key_2 = 10,
-        "handle foo",
-    );
-
-    tracing::info!(histogram.baz = 10, "histogram example",);
-}
 
 fn params() -> PbftParams {
     PbftParams {
@@ -45,22 +33,98 @@ fn params() -> PbftParams {
     }
 }
 
-async fn run_node(replica_index: ReplicaIndex) -> anyhow::Result<()> {
-    let config = PbftCoreConfig {
-        params: params(),
-        replica_index,
-        window_size: 1,
-        max_block_size: 1,
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let tracer_provider = init_tracing_subscriber();
+
+    let mut fabric_bytes_rx_vec = Vec::new();
+    let mut fabric_bytes_tx_map = HashMap::new();
+    for i in 0..params().num_replicas {
+        let (bytes_tx, bytes_rx) = channel(1000);
+        fabric_bytes_tx_map.insert(i as ReplicaIndex, bytes_tx);
+        fabric_bytes_rx_vec.push(bytes_rx);
+    }
+    let mut join_set = JoinSet::new();
+    let mut request_tx = None;
+    let mut deliver_rx_vec = Vec::new();
+    let token = CancellationToken::new();
+    for (i, mut fabric_bytes_rx) in fabric_bytes_rx_vec.into_iter().enumerate() {
+        let config = PbftCoreConfig {
+            params: params(),
+            replica_index: i as ReplicaIndex,
+            window_size: 1,
+            max_block_size: 1,
+        };
+
+        let mut node = PbftNode::<DummyCrypto>::new(config);
+        let mut verify_worker = PbftCryptoVerifyWorker::new(DummyCrypto, params());
+        let mut sign_worker = PbftCryptoSignWorker::new(DummyCrypto, params());
+
+        let emit_request = if i == 0 { &mut request_tx } else { &mut None };
+        node.register(emit_request, &mut verify_worker, &mut sign_worker);
+        let mut node_bytes_tx = None;
+        verify_worker.register(&mut node_bytes_tx);
+        let node_bytes_tx = node_bytes_tx.unwrap();
+        sign_worker.register(&mut node);
+
+        let (deliver_tx, deliver_rx) = channel(1000);
+        Emit::<Deliver>::set_tx(&mut node, deliver_tx);
+        deliver_rx_vec.push(deliver_rx);
+        let mut fabric_bytes_tx_map = fabric_bytes_tx_map.clone();
+        fabric_bytes_tx_map.remove(&(i as ReplicaIndex));
+        EmitMap::<_, SendBytes>::set_tx_map(&mut sign_worker, fabric_bytes_tx_map);
+
+        join_set.spawn({
+            let token = token.clone();
+            async move { node.run(&token).await }
+        });
+        join_set.spawn({
+            let token = token.clone();
+            async move { sign_worker.run(&token).await }
+        });
+        join_set.spawn({
+            let token = token.clone();
+            async move { verify_worker.run(&token).await }
+        });
+        join_set.spawn({
+            let token = token.clone();
+            async move {
+                while let Some(Some(bytes)) =
+                    token.run_until_cancelled(fabric_bytes_rx.recv()).await
+                {
+                    if let Err(err) = node_bytes_tx.send(bytes.into()).await {
+                        tracing::error!("Failed to send bytes to node {i}: {err:#}");
+                    }
+                }
+            }
+        });
+    }
+    let request_tx = request_tx.unwrap();
+    let workload = async move {
+        request_tx
+            .send(PbftRequest(b"hello".into()))
+            .await
+            .context("request")?;
+        for (i, mut deliver_rx) in deliver_rx_vec.into_iter().enumerate() {
+            deliver_rx
+                .recv()
+                .await
+                .context(format!("Node {i} deliver"))?;
+            tracing::info!("Node {i} delivered");
+        }
+        anyhow::Ok(())
     };
-    let mut node = PbftNode::<DummyCrypto>::new(config);
-    let mut verify_worker = PbftCryptoVerifyWorker::new(DummyCrypto, params());
-    let mut sign_worker = PbftCryptoSignWorker::new(DummyCrypto, params());
-    let mut emit_request = Option::<Sender<_>>::None;
-    let mut emit_handle_bytes = Option::<Sender<_>>::None;
-    node.register(&mut emit_request, &mut verify_worker, &mut sign_worker);
-    verify_worker.register(&mut emit_handle_bytes);
-    sign_worker.register(&mut node);
-    tokio::join!(node.run(), verify_worker.run(), sign_worker.run());
+    join_set.spawn(async move {
+        if let Err(err) = workload.await {
+            tracing::error!("Workload error: {err:#}");
+        }
+        token.cancel();
+    });
+
+    while let Some(res) = join_set.join_next().await {
+        res.unwrap()
+    }
+    tracer_provider.shutdown()?;
     Ok(())
 }
 
@@ -71,44 +135,18 @@ fn resource() -> Resource {
         .with_schema_url(
             [
                 KeyValue::new(SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
-                // KeyValue::new(DEPLOYMENT_ENVIRONMENT_NAME, "develop"),
+                // KeyValue::new(SERVICE_INSTANCE_ID, uuid::Uuid::new_v4().to_string()),
+                KeyValue::new(DEPLOYMENT_ENVIRONMENT_NAME, "develop"),
             ],
             SCHEMA_URL,
         )
         .build()
 }
 
-// Construct MeterProvider for MetricsLayer
-fn init_meter_provider() -> SdkMeterProvider {
-    let exporter = opentelemetry_otlp::MetricExporter::builder()
-        .with_tonic()
-        .with_temporality(opentelemetry_sdk::metrics::Temporality::default())
-        .build()
-        .unwrap();
-
-    let reader = PeriodicReader::builder(exporter)
-        .with_interval(std::time::Duration::from_secs(30))
-        .build();
-
-    // For debugging in development
-    // let stdout_reader =
-    //     PeriodicReader::builder(opentelemetry_stdout::MetricExporter::default()).build();
-
-    let meter_provider = MeterProviderBuilder::default()
-        .with_resource(resource())
-        .with_reader(reader)
-        // .with_reader(stdout_reader)
-        .build();
-
-    global::set_meter_provider(meter_provider.clone());
-
-    meter_provider
-}
-
 // Construct TracerProvider for OpenTelemetryLayer
 fn init_tracer_provider() -> SdkTracerProvider {
     let exporter = opentelemetry_otlp::SpanExporter::builder()
-        .with_tonic()
+        .with_http()
         .build()
         .unwrap();
 
@@ -125,11 +163,10 @@ fn init_tracer_provider() -> SdkTracerProvider {
 }
 
 // Initialize tracing-subscriber and return OtelGuard for opentelemetry-related termination processing
-fn init_tracing_subscriber() -> OtelGuard {
+fn init_tracing_subscriber() -> SdkTracerProvider {
     let tracer_provider = init_tracer_provider();
-    let meter_provider = init_meter_provider();
 
-    let tracer = tracer_provider.tracer("tracing-otel-subscriber");
+    let tracer = tracer_provider.tracer(env!("CARGO_PKG_NAME"));
 
     tracing_subscriber::registry()
         // The global level filter prevents the exporter network stack
@@ -143,28 +180,8 @@ fn init_tracing_subscriber() -> OtelGuard {
             Level::INFO,
         ))
         .with(tracing_subscriber::fmt::layer())
-        .with(MetricsLayer::new(meter_provider.clone()))
         .with(OpenTelemetryLayer::new(tracer))
         .init();
 
-    OtelGuard {
-        tracer_provider,
-        meter_provider,
-    }
-}
-
-struct OtelGuard {
-    tracer_provider: SdkTracerProvider,
-    meter_provider: SdkMeterProvider,
-}
-
-impl Drop for OtelGuard {
-    fn drop(&mut self) {
-        if let Err(err) = self.tracer_provider.shutdown() {
-            eprintln!("{err:?}");
-        }
-        if let Err(err) = self.meter_provider.shutdown() {
-            eprintln!("{err:?}");
-        }
-    }
+    tracer_provider
 }

@@ -5,6 +5,7 @@ use tokio::{
     sync::mpsc::{Receiver, Sender, channel},
     time::interval,
 };
+use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::{
@@ -17,7 +18,7 @@ mod core;
 #[cfg(test)]
 mod tests;
 
-pub use core::{PbftCoreConfig, PbftParams};
+pub use core::{PbftCoreConfig, PbftParams, PbftRequest};
 
 pub mod events {
     use bytes::Bytes;
@@ -132,10 +133,14 @@ impl<C: core::PbftCoreCryptoContext> Emit<events::Deliver> for PbftNode<C> {
 }
 
 impl<C: core::PbftCoreCryptoContext> PbftNode<C> {
-    pub async fn run(&mut self) {
+    pub async fn run(&mut self, token: &CancellationToken) {
         let mut interval = interval(Duration::from_millis(100));
         loop {
             tokio::select! {
+                () = token.cancelled() => {
+                    break;
+                }
+
                 Some(request) = self.request_rx.recv() => {
                     self.core.handle_request(request).await;
                 }
@@ -162,7 +167,7 @@ impl<C: core::PbftCoreCryptoContext> core::PbftCoreContext for PbftCoreContextSt
             .send((Recipient::To(to), message))
             .await
         {
-            warn!("Failed to send message to crypto verify worker: {err}");
+            warn!("Failed to send message to crypto verify worker: {err:#}");
         }
     }
 
@@ -174,7 +179,7 @@ impl<C: core::PbftCoreCryptoContext> core::PbftCoreContext for PbftCoreContextSt
             .send((Recipient::Broadcast, message))
             .await
         {
-            warn!("Failed to send message to crypto verify worker: {err}");
+            warn!("Failed to send message to crypto verify worker: {err:#}");
         }
     }
 
@@ -186,7 +191,7 @@ impl<C: core::PbftCoreCryptoContext> core::PbftCoreContext for PbftCoreContextSt
             .send((requests, view_num))
             .await
         {
-            warn!("Failed to deliver requests: {err}");
+            warn!("Failed to deliver requests: {err:#}");
         }
     }
 
@@ -228,8 +233,8 @@ impl<C: core::PbftCoreCryptoContext> Emit<events::SignedMessage<C::Sig>>
 }
 
 impl<C: core::PbftCoreCryptoContext> PbftCryptoVerifyWorker<C> {
-    pub async fn run(&mut self) {
-        while let Some(bytes) = self.bytes_rx.recv().await {
+    pub async fn run(&mut self, token: &CancellationToken) {
+        while let Some(Some(bytes)) = token.run_until_cancelled(self.bytes_rx.recv()).await {
             let Some((message_bytes, sig_bytes)) =
                 bytes.split_at_checked(bytes.len() - C::Sig::bytes_len())
             else {
@@ -246,11 +251,11 @@ impl<C: core::PbftCoreCryptoContext> PbftCryptoVerifyWorker<C> {
                         .send((message, sig))
                         .await
                     {
-                        warn!("Failed to send verified message to node: {err}");
+                        warn!("Failed to send verified message to node: {err:#}");
                     }
                 }
                 Err(err) => {
-                    warn!("Failed to verify message: {err}");
+                    warn!("Failed to verify message: {err:#}");
                 }
             }
         }
@@ -306,21 +311,23 @@ impl<C: core::PbftCoreCryptoContext> Emit<events::LoopbackMessage<C::Sig>>
 }
 
 impl<C: core::PbftCoreCryptoContext> PbftCryptoSignWorker<C> {
-    pub async fn run(&mut self) {
-        while let Some((recipient, mut message)) = self.message_rx.recv().await {
+    pub async fn run(&mut self, token: &CancellationToken) {
+        while let Some(Some((recipient, mut message))) =
+            token.run_until_cancelled(self.message_rx.recv()).await
+        {
             let (mut bytes, sig) = self.core_crypto.sign(&mut message);
             bytes.extend_from_slice(sig.as_bytes());
             let bytes = bytes.into();
             match recipient {
                 Recipient::To(to) => {
                     if let Err(err) = self.bytes_tx_map.as_ref().unwrap()[&to].send(bytes).await {
-                        warn!("Failed to send message to node {to}: {err}");
+                        warn!("Failed to send message to node {to}: {err:#}");
                     }
                 }
                 Recipient::Broadcast => {
                     for (to, bytes_tx) in self.bytes_tx_map.as_ref().unwrap() {
                         if let Err(err) = bytes_tx.send(bytes.clone()).await {
-                            warn!("Failed to broadcast message to node {to}: {err}");
+                            warn!("Failed to broadcast message to node {to}: {err:#}");
                         }
                     }
                     if let Err(err) = self
@@ -330,7 +337,7 @@ impl<C: core::PbftCoreCryptoContext> PbftCryptoSignWorker<C> {
                         .send((message, sig))
                         .await
                     {
-                        warn!("Failed to send signed message to node: {err}");
+                        warn!("Failed to send signed message to node: {err:#}");
                     }
                 }
             }
