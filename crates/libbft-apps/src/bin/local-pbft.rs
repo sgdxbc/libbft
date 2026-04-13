@@ -25,7 +25,7 @@ use tokio::{sync::mpsc::channel, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{Level, info_span};
 use tracing_opentelemetry::OpenTelemetryLayer;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{Layer, filter::Targets, layer::SubscriberExt, util::SubscriberInitExt};
 
 fn params() -> PbftParams {
     PbftParams {
@@ -91,11 +91,14 @@ async fn main() -> anyhow::Result<()> {
         join_set.spawn({
             let token = token.clone();
             async move {
-                while let Some(Some((bytes, _span))) =
+                while let Some(Some((bytes, span))) =
                     token.run_until_cancelled(fabric_bytes_rx.recv()).await
                 {
-                    let span = info_span!("HandleBytes");
-                    if let Err(err) = node_bytes_tx.send((bytes.into(), span)).await {
+                    let _enter = span.enter();
+                    if let Err(err) = node_bytes_tx
+                        .send((bytes.into(), info_span!("HandleBytes")))
+                        .await
+                    {
                         tracing::error!("Failed to send bytes to node {i}: {err:#}");
                     }
                 }
@@ -172,6 +175,11 @@ fn init_tracing_subscriber() -> SdkTracerProvider {
 
     let tracer = tracer_provider.tracer(env!("CARGO_PKG_NAME"));
 
+    let targets = if let Ok(filter) = std::env::var("RUST_LOG") {
+        filter.parse().unwrap()
+    } else {
+        Targets::new()
+    };
     tracing_subscriber::registry()
         // The global level filter prevents the exporter network stack
         // from reentering the globally installed OpenTelemetryLayer with
@@ -183,7 +191,7 @@ fn init_tracing_subscriber() -> SdkTracerProvider {
         .with(tracing_subscriber::filter::LevelFilter::from_level(
             Level::INFO,
         ))
-        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::fmt::layer().with_filter(targets))
         .with(OpenTelemetryLayer::new(tracer))
         .init();
 

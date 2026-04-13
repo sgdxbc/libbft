@@ -323,22 +323,11 @@ impl<C: PbftCoreContext> PbftCore<C> {
             return;
         }
         if self.config.params.slot_prepared(slot) {
-            info!(
-                self.config.replica_index,
-                "Sending Commit for already prepared slot seq_num {} to replica {}",
-                prepare.seq_num,
-                prepare.replica_index
-            );
-            // we don't need this Prepare, but the sender may need our Commit
-            let commit = Commit {
-                view_num: self.view_num,
-                seq_num: prepare.seq_num,
-                digest: prepare.digest.clone(),
-                replica_index: self.config.replica_index,
-            };
-            self.context
-                .send_message(prepare.replica_index, PbftMessage::Commit(commit))
-                .await;
+            // while we don't need this Prepare, the sender may need our Commit
+            // however, if we reply a dedicated Commit in this case, we will always send f dedicated
+            // Commit for each slot, since there will always be f slow Prepare received after we
+            // have prepared. so we don't concern remote liveness here, but push that to dedicated
+            // state transfer path
             return;
         }
         self.insert_prepare(prepare, sig).await;
@@ -351,6 +340,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
         slot.signed_prepares
             .insert(prepare.replica_index, (prepare, sig));
         if self.config.params.slot_prepared(slot) {
+            info!(self.config.replica_index, "Slot {seq_num} is prepared");
             let commit = Commit {
                 view_num: self.view_num,
                 seq_num,
@@ -389,10 +379,12 @@ impl<C: PbftCoreContext> PbftCore<C> {
     }
 
     async fn insert_commit(&mut self, commit: Commit, sig: C::Sig) {
-        let slot = self.log.get_mut(&commit.seq_num).unwrap();
+        let seq_num = commit.seq_num;
+        let slot = self.log.get_mut(&seq_num).unwrap();
         slot.signed_commits
             .insert(commit.replica_index, (commit, sig));
         if self.config.params.slot_committed(slot) {
+            info!(self.config.replica_index, "Slot {seq_num} is committed");
             self.execute_slots().await;
         }
     }
