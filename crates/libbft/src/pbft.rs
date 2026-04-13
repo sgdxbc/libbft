@@ -1,16 +1,12 @@
 use std::{collections::HashMap, time::Duration};
 
-use bytes::Bytes;
-use tokio::{
-    sync::mpsc::{Receiver, Sender, channel},
-    time::interval,
-};
+use tokio::{sync::mpsc::channel, time::interval};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, Span, instrument, warn};
 
 use crate::{
     crypto::Sig as _,
-    event::{Emit, EmitMap},
+    event::{Emit, EmitMap, EventReceiver, EventSender},
     pbft::events::Recipient,
 };
 
@@ -69,17 +65,17 @@ pub mod events {
 pub struct PbftNode<C: core::PbftCoreCryptoContext> {
     core: core::PbftCore<PbftCoreContextState<C>>,
 
-    request_tx: Sender<(core::PbftRequest, Span)>,
-    request_rx: Receiver<(core::PbftRequest, Span)>,
-    signed_message_tx: Sender<((core::PbftMessage, C::Sig), Span)>,
-    signed_message_rx: Receiver<((core::PbftMessage, C::Sig), Span)>,
-    loopback_tx: Sender<((core::PbftMessage, C::Sig), Span)>,
-    loopback_rx: Receiver<((core::PbftMessage, C::Sig), Span)>,
+    request_tx: EventSender<events::HandleRequest>,
+    request_rx: EventReceiver<events::HandleRequest>,
+    signed_message_tx: EventSender<events::SignedMessage<C::Sig>>,
+    signed_message_rx: EventReceiver<events::SignedMessage<C::Sig>>,
+    loopback_tx: EventSender<events::LoopbackMessage<C::Sig>>,
+    loopback_rx: EventReceiver<events::LoopbackMessage<C::Sig>>,
 }
 
 pub struct PbftCoreContextState<C: core::PbftCoreCryptoContext> {
-    message_tx: Option<Sender<((Recipient, core::PbftMessage), Span)>>, // crypto verify worker
-    deliver_tx: Option<Sender<((Vec<core::PbftRequest>, core::ViewNum), Span)>>, //
+    message_tx: Option<EventSender<events::SendMessage>>,
+    deliver_tx: Option<EventSender<events::Deliver>>,
 
     _crypto: std::marker::PhantomData<C>,
 }
@@ -119,17 +115,13 @@ impl<C: core::PbftCoreCryptoContext> PbftNode<C> {
 }
 
 impl<C: core::PbftCoreCryptoContext> Emit<events::SendMessage> for PbftNode<C> {
-    fn tx_slot(
-        &mut self,
-    ) -> &mut Option<Sender<(<events::SendMessage as crate::event::Event>::Type, Span)>> {
+    fn tx_slot(&mut self) -> &mut Option<EventSender<events::SendMessage>> {
         &mut self.core.context.message_tx
     }
 }
 
 impl<C: core::PbftCoreCryptoContext> Emit<events::Deliver> for PbftNode<C> {
-    fn tx_slot(
-        &mut self,
-    ) -> &mut Option<Sender<(<events::Deliver as crate::event::Event>::Type, Span)>> {
+    fn tx_slot(&mut self) -> &mut Option<EventSender<events::Deliver>> {
         &mut self.core.context.deliver_tx
     }
 }
@@ -204,9 +196,9 @@ impl<C: core::PbftCoreCryptoContext> core::PbftCoreContext for PbftCoreContextSt
 pub struct PbftCryptoVerifyWorker<C: core::PbftCoreCryptoContext> {
     core_crypto: core::PbftCoreCrypto<C>,
 
-    bytes_tx: Sender<(Vec<u8>, Span)>,
-    bytes_rx: Receiver<(Vec<u8>, Span)>,
-    signed_message_tx: Option<Sender<((core::PbftMessage, C::Sig), Span)>>, // node
+    bytes_tx: EventSender<events::HandleBytes>,
+    bytes_rx: EventReceiver<events::HandleBytes>,
+    signed_message_tx: Option<EventSender<events::SignedMessage<C::Sig>>>, // node
 }
 
 impl<C: core::PbftCoreCryptoContext> PbftCryptoVerifyWorker<C> {
@@ -228,14 +220,7 @@ impl<C: core::PbftCoreCryptoContext> PbftCryptoVerifyWorker<C> {
 impl<C: core::PbftCoreCryptoContext> Emit<events::SignedMessage<C::Sig>>
     for PbftCryptoVerifyWorker<C>
 {
-    fn tx_slot(
-        &mut self,
-    ) -> &mut Option<
-        Sender<(
-            <events::SignedMessage<C::Sig> as crate::event::Event>::Type,
-            Span,
-        )>,
-    > {
+    fn tx_slot(&mut self) -> &mut Option<EventSender<events::SignedMessage<C::Sig>>> {
         &mut self.signed_message_tx
     }
 }
@@ -283,10 +268,10 @@ impl<C: core::PbftCoreCryptoContext> PbftCryptoVerifyWorker<C> {
 pub struct PbftCryptoSignWorker<C: core::PbftCoreCryptoContext> {
     core_crypto: core::PbftCoreCrypto<C>,
 
-    message_tx: Sender<((Recipient, core::PbftMessage), Span)>,
-    message_rx: Receiver<((Recipient, core::PbftMessage), Span)>,
-    bytes_tx_map: Option<HashMap<core::ReplicaIndex, Sender<(Bytes, Span)>>>, // network
-    loopback_tx: Option<Sender<((core::PbftMessage, C::Sig), Span)>>,         // node
+    message_tx: EventSender<events::SendMessage>,
+    message_rx: EventReceiver<events::SendMessage>,
+    bytes_tx_map: Option<HashMap<core::ReplicaIndex, EventSender<events::SendBytes>>>, // network
+    loopback_tx: Option<EventSender<events::LoopbackMessage<C::Sig>>>,                 // node
 }
 
 impl<C: core::PbftCoreCryptoContext> PbftCryptoSignWorker<C> {
@@ -311,12 +296,7 @@ impl<C: core::PbftCoreCryptoContext> EmitMap<core::ReplicaIndex, events::SendByt
 {
     fn tx_map_slot(
         &mut self,
-    ) -> &mut Option<
-        HashMap<
-            core::ReplicaIndex,
-            Sender<(<events::SendBytes as crate::event::Event>::Type, Span)>,
-        >,
-    > {
+    ) -> &mut Option<HashMap<core::ReplicaIndex, EventSender<events::SendBytes>>> {
         &mut self.bytes_tx_map
     }
 }
@@ -324,14 +304,7 @@ impl<C: core::PbftCoreCryptoContext> EmitMap<core::ReplicaIndex, events::SendByt
 impl<C: core::PbftCoreCryptoContext> Emit<events::LoopbackMessage<C::Sig>>
     for PbftCryptoSignWorker<C>
 {
-    fn tx_slot(
-        &mut self,
-    ) -> &mut Option<
-        Sender<(
-            <events::LoopbackMessage<C::Sig> as crate::event::Event>::Type,
-            Span,
-        )>,
-    > {
+    fn tx_slot(&mut self) -> &mut Option<EventSender<events::LoopbackMessage<C::Sig>>> {
         &mut self.loopback_tx
     }
 }
