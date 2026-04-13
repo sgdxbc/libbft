@@ -13,6 +13,7 @@ use crate::{
 mod core;
 #[cfg(test)]
 mod tests;
+mod workers;
 
 pub use core::{PbftCoreConfig, PbftParams, PbftRequest};
 
@@ -62,7 +63,7 @@ pub mod events {
     }
 }
 
-pub struct PbftNode<C: core::PbftCoreCryptoContext> {
+pub struct PbftProtocol<C: workers::PbftCryptoContext> {
     core: core::PbftCore<PbftCoreContextState<C>>,
 
     request_tx: EventSender<events::HandleRequest>,
@@ -73,14 +74,14 @@ pub struct PbftNode<C: core::PbftCoreCryptoContext> {
     loopback_rx: EventReceiver<events::LoopbackMessage<C::Sig>>,
 }
 
-pub struct PbftCoreContextState<C: core::PbftCoreCryptoContext> {
+pub struct PbftCoreContextState<C: workers::PbftCryptoContext> {
     message_tx: Option<EventSender<events::SendMessage>>,
     deliver_tx: Option<EventSender<events::Deliver>>,
 
     _crypto: std::marker::PhantomData<C>,
 }
 
-impl<C: core::PbftCoreCryptoContext> PbftNode<C> {
+impl<C: workers::PbftCryptoContext> PbftProtocol<C> {
     pub fn new(config: core::PbftCoreConfig) -> Self {
         let (request_tx, request_rx) = channel(1000);
         let (signed_message_tx, signed_message_rx) = channel(1000);
@@ -114,19 +115,19 @@ impl<C: core::PbftCoreCryptoContext> PbftNode<C> {
     }
 }
 
-impl<C: core::PbftCoreCryptoContext> Emit<events::SendMessage> for PbftNode<C> {
+impl<C: workers::PbftCryptoContext> Emit<events::SendMessage> for PbftProtocol<C> {
     fn tx_slot(&mut self) -> &mut Option<EventSender<events::SendMessage>> {
         &mut self.core.context.message_tx
     }
 }
 
-impl<C: core::PbftCoreCryptoContext> Emit<events::Deliver> for PbftNode<C> {
+impl<C: workers::PbftCryptoContext> Emit<events::Deliver> for PbftProtocol<C> {
     fn tx_slot(&mut self) -> &mut Option<EventSender<events::Deliver>> {
         &mut self.core.context.deliver_tx
     }
 }
 
-impl<C: core::PbftCoreCryptoContext> PbftNode<C> {
+impl<C: workers::PbftCryptoContext> PbftProtocol<C> {
     pub async fn run(&mut self, token: &CancellationToken) {
         let mut interval = interval(Duration::from_millis(100));
         loop {
@@ -152,7 +153,7 @@ impl<C: core::PbftCoreCryptoContext> PbftNode<C> {
     }
 }
 
-impl<C: core::PbftCoreCryptoContext> core::PbftCoreContext for PbftCoreContextState<C> {
+impl<C: workers::PbftCryptoContext> core::PbftCoreContext for PbftCoreContextState<C> {
     async fn send_message(&mut self, to: core::ReplicaIndex, message: core::PbftMessage) {
         if let Err(err) = self
             .message_tx
@@ -193,19 +194,19 @@ impl<C: core::PbftCoreCryptoContext> core::PbftCoreContext for PbftCoreContextSt
     type Sig = C::Sig;
 }
 
-pub struct PbftCryptoVerifyWorker<C: core::PbftCoreCryptoContext> {
-    core_crypto: core::PbftCoreCrypto<C>,
+pub struct PbftIngressWorker<C: workers::PbftCryptoContext> {
+    state: workers::PbftWorker<C>,
 
     bytes_tx: EventSender<events::HandleBytes>,
     bytes_rx: EventReceiver<events::HandleBytes>,
     signed_message_tx: Option<EventSender<events::SignedMessage<C::Sig>>>, // node
 }
 
-impl<C: core::PbftCoreCryptoContext> PbftCryptoVerifyWorker<C> {
+impl<C: workers::PbftCryptoContext> PbftIngressWorker<C> {
     pub fn new(core_crypto_context: C, params: core::PbftParams) -> Self {
         let (bytes_tx, bytes_rx) = channel(1000);
         Self {
-            core_crypto: core::PbftCoreCrypto::new(core_crypto_context, params),
+            state: workers::PbftWorker::new(core_crypto_context, params),
             bytes_tx,
             bytes_rx,
             signed_message_tx: None,
@@ -217,15 +218,13 @@ impl<C: core::PbftCoreCryptoContext> PbftCryptoVerifyWorker<C> {
     }
 }
 
-impl<C: core::PbftCoreCryptoContext> Emit<events::SignedMessage<C::Sig>>
-    for PbftCryptoVerifyWorker<C>
-{
+impl<C: workers::PbftCryptoContext> Emit<events::SignedMessage<C::Sig>> for PbftIngressWorker<C> {
     fn tx_slot(&mut self) -> &mut Option<EventSender<events::SignedMessage<C::Sig>>> {
         &mut self.signed_message_tx
     }
 }
 
-impl<C: core::PbftCoreCryptoContext> PbftCryptoVerifyWorker<C> {
+impl<C: workers::PbftCryptoContext> PbftIngressWorker<C> {
     pub async fn run(&mut self, token: &CancellationToken) {
         while let Some(Some((bytes, span))) = token.run_until_cancelled(self.bytes_rx.recv()).await
         {
@@ -260,13 +259,13 @@ impl<C: core::PbftCoreCryptoContext> PbftCryptoVerifyWorker<C> {
             anyhow::bail!("Received bytes too short to contain signature");
         };
         let sig = C::Sig::from_bytes(sig_bytes);
-        let message = self.core_crypto.verify(data_bytes, &sig, piggyback_data)?;
+        let message = self.state.egress(data_bytes, &sig, piggyback_data)?;
         Ok((message, sig))
     }
 }
 
-pub struct PbftCryptoSignWorker<C: core::PbftCoreCryptoContext> {
-    core_crypto: core::PbftCoreCrypto<C>,
+pub struct PbftEgressWorker<C: workers::PbftCryptoContext> {
+    state: workers::PbftWorker<C>,
 
     message_tx: EventSender<events::SendMessage>,
     message_rx: EventReceiver<events::SendMessage>,
@@ -274,11 +273,11 @@ pub struct PbftCryptoSignWorker<C: core::PbftCoreCryptoContext> {
     loopback_tx: Option<EventSender<events::LoopbackMessage<C::Sig>>>,                 // node
 }
 
-impl<C: core::PbftCoreCryptoContext> PbftCryptoSignWorker<C> {
+impl<C: workers::PbftCryptoContext> PbftEgressWorker<C> {
     pub fn new(core_crypto_context: C, params: core::PbftParams) -> Self {
         let (message_tx, message_rx) = channel(1000);
         Self {
-            core_crypto: core::PbftCoreCrypto::new(core_crypto_context, params),
+            state: workers::PbftWorker::new(core_crypto_context, params),
             message_tx,
             message_rx,
             bytes_tx_map: None,
@@ -291,8 +290,8 @@ impl<C: core::PbftCoreCryptoContext> PbftCryptoSignWorker<C> {
     }
 }
 
-impl<C: core::PbftCoreCryptoContext> EmitMap<core::ReplicaIndex, events::SendBytes>
-    for PbftCryptoSignWorker<C>
+impl<C: workers::PbftCryptoContext> EmitMap<core::ReplicaIndex, events::SendBytes>
+    for PbftEgressWorker<C>
 {
     fn tx_map_slot(
         &mut self,
@@ -301,20 +300,18 @@ impl<C: core::PbftCoreCryptoContext> EmitMap<core::ReplicaIndex, events::SendByt
     }
 }
 
-impl<C: core::PbftCoreCryptoContext> Emit<events::LoopbackMessage<C::Sig>>
-    for PbftCryptoSignWorker<C>
-{
+impl<C: workers::PbftCryptoContext> Emit<events::LoopbackMessage<C::Sig>> for PbftEgressWorker<C> {
     fn tx_slot(&mut self) -> &mut Option<EventSender<events::LoopbackMessage<C::Sig>>> {
         &mut self.loopback_tx
     }
 }
 
-impl<C: core::PbftCoreCryptoContext> PbftCryptoSignWorker<C> {
+impl<C: workers::PbftCryptoContext> PbftEgressWorker<C> {
     pub async fn run(&mut self, token: &CancellationToken) {
         while let Some(Some(((recipient, mut message), span))) =
             token.run_until_cancelled(self.message_rx.recv()).await
         {
-            let (bytes, sig, piggyback_data) = self.core_crypto.sign(&mut message);
+            let (bytes, sig, piggyback_data) = self.state.ingress(&mut message);
             let data_bytes = [sig.as_bytes(), &bytes].concat();
             let bytes = [
                 &(data_bytes.len() as u32).to_le_bytes()[..],

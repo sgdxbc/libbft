@@ -5,8 +5,7 @@ use libbft::{
     crypto::DummyCrypto,
     event::{Emit, EmitMap},
     pbft::{
-        PbftCoreConfig, PbftCryptoSignWorker, PbftCryptoVerifyWorker, PbftNode, PbftParams,
-        PbftRequest,
+        PbftCoreConfig, PbftEgressWorker, PbftIngressWorker, PbftParams, PbftProtocol, PbftRequest,
         events::{Deliver, SendBytes},
     },
     types::ReplicaIndex,
@@ -58,35 +57,35 @@ async fn main() -> anyhow::Result<()> {
             max_block_size: 1,
         };
 
-        let mut node = PbftNode::<DummyCrypto>::new(config);
-        let mut verify_worker = PbftCryptoVerifyWorker::new(DummyCrypto, params());
-        let mut sign_worker = PbftCryptoSignWorker::new(DummyCrypto, params());
+        let mut protocol = PbftProtocol::<DummyCrypto>::new(config);
+        let mut ingress = PbftIngressWorker::new(DummyCrypto, params());
+        let mut egress = PbftEgressWorker::new(DummyCrypto, params());
 
         let emit_request = if i == 0 { &mut request_tx } else { &mut None };
-        node.register(emit_request, &mut verify_worker, &mut sign_worker);
+        protocol.register(emit_request, &mut ingress, &mut egress);
         let mut node_bytes_tx = None;
-        verify_worker.register(&mut node_bytes_tx);
+        ingress.register(&mut node_bytes_tx);
         let node_bytes_tx = node_bytes_tx.unwrap();
-        sign_worker.register(&mut node);
+        egress.register(&mut protocol);
 
         let (deliver_tx, deliver_rx) = channel(1000);
-        Emit::<Deliver>::set_tx(&mut node, deliver_tx);
+        Emit::<Deliver>::set_tx(&mut protocol, deliver_tx);
         deliver_rx_vec.push(deliver_rx);
         let mut fabric_bytes_tx_map = fabric_bytes_tx_map.clone();
         fabric_bytes_tx_map.remove(&(i as ReplicaIndex));
-        EmitMap::<_, SendBytes>::set_tx_map(&mut sign_worker, fabric_bytes_tx_map);
+        EmitMap::<_, SendBytes>::set_tx_map(&mut egress, fabric_bytes_tx_map);
 
         join_set.spawn({
             let token = token.clone();
-            async move { node.run(&token).await }
+            async move { protocol.run(&token).await }
         });
         join_set.spawn({
             let token = token.clone();
-            async move { sign_worker.run(&token).await }
+            async move { egress.run(&token).await }
         });
         join_set.spawn({
             let token = token.clone();
-            async move { verify_worker.run(&token).await }
+            async move { ingress.run(&token).await }
         });
         join_set.spawn({
             let token = token.clone();
