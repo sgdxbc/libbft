@@ -1,5 +1,6 @@
 use std::collections::{HashMap, hash_map::Entry};
 
+use anyhow::Context;
 use borsh::{BorshDeserialize, BorshSerialize};
 use tokio::time::Instant;
 use tracing::{info, instrument, warn};
@@ -50,21 +51,21 @@ pub trait PbftCoreContext {
 #[derive(Debug, BorshSerialize, BorshDeserialize, Clone)]
 pub struct PbftRequest(pub Vec<u8>);
 
-#[derive(Debug, BorshSerialize, BorshDeserialize)]
+#[derive(Debug)]
 pub enum PbftMessage {
     PrePrepare(PrePrepare, Vec<PbftRequest>),
     Prepare(Prepare),
     Commit(Commit),
 }
 
-#[derive(Debug, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, BorshSerialize, BorshDeserialize, Clone)]
 pub struct PrePrepare {
     view_num: ViewNum,
     seq_num: SeqNum,
     digest: Digest,
 }
 
-#[derive(Debug, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, BorshSerialize, BorshDeserialize, Clone)]
 pub struct Prepare {
     view_num: ViewNum,
     seq_num: SeqNum,
@@ -72,7 +73,7 @@ pub struct Prepare {
     replica_index: ReplicaIndex,
 }
 
-#[derive(Debug, BorshSerialize, BorshDeserialize)]
+#[derive(Debug, BorshSerialize, BorshDeserialize, Clone)]
 pub struct Commit {
     view_num: ViewNum,
     seq_num: SeqNum,
@@ -422,6 +423,14 @@ pub struct PbftCoreCrypto<C> {
     params: PbftParams,
 }
 
+// verifiable data covered by signatures
+#[derive(Debug, BorshSerialize, BorshDeserialize)]
+enum PbftVerifiableData {
+    PrePrepare(PrePrepare),
+    Prepare(Prepare),
+    Commit(Commit),
+}
+
 impl<C: PbftCoreCryptoContext> PbftCoreCrypto<C> {
     pub fn new(context: C, params: PbftParams) -> Self {
         Self { context, params }
@@ -429,22 +438,38 @@ impl<C: PbftCoreCryptoContext> PbftCoreCrypto<C> {
 
     // TODO avoid redundant serialization on `requests`
 
-    pub fn sign(&self, message: &mut PbftMessage) -> (Vec<u8>, C::Sig) {
-        if let PbftMessage::PrePrepare(pre_prepare, requests) = message {
-            let requests_bytes = borsh::to_vec(requests).unwrap();
-            pre_prepare.digest = self.context.digest(&requests_bytes);
-        }
-        let bytes = borsh::to_vec(message).unwrap();
-        let sig = self.context.sign(&bytes);
-        (bytes, sig)
+    pub fn sign(&self, message: &mut PbftMessage) -> (Vec<u8>, C::Sig, Vec<u8>) {
+        let mut piggyback_data = vec![];
+        let verifiable_data = match message {
+            PbftMessage::PrePrepare(pre_prepare, requests) => {
+                piggyback_data = borsh::to_vec(requests).unwrap();
+                pre_prepare.digest = self.context.digest(&piggyback_data);
+                PbftVerifiableData::PrePrepare(pre_prepare.clone())
+            }
+            PbftMessage::Prepare(prepare) => PbftVerifiableData::Prepare(prepare.clone()),
+            PbftMessage::Commit(commit) => PbftVerifiableData::Commit(commit.clone()),
+        };
+        let bytes = borsh::to_vec(&verifiable_data).unwrap();
+        let sig = self.context.sign(&borsh::to_vec(&verifiable_data).unwrap());
+        (bytes, sig, piggyback_data)
     }
 
-    pub fn verify(&self, bytes: &[u8], sig: &C::Sig) -> anyhow::Result<PbftMessage> {
-        let message = borsh::from_slice(bytes)?;
-        match &message {
-            PbftMessage::PrePrepare(pre_prepare, requests) => {
-                let requests_bytes = borsh::to_vec(requests).unwrap();
-                let expected_digest = self.context.digest(&requests_bytes);
+    pub fn verify(
+        &self,
+        bytes: &[u8],
+        sig: &C::Sig,
+        piggyback_data: &[u8],
+    ) -> anyhow::Result<PbftMessage> {
+        let data = borsh::from_slice(bytes).context("Failed to deserialize verifiable data")?;
+        if !matches!(data, PbftVerifiableData::PrePrepare(_)) {
+            anyhow::ensure!(
+                piggyback_data.is_empty(),
+                "Unexpected piggyback data for non-PrePrepare message"
+            );
+        }
+        let message = match data {
+            PbftVerifiableData::PrePrepare(pre_prepare) => {
+                let expected_digest = self.context.digest(piggyback_data);
                 anyhow::ensure!(
                     pre_prepare.digest == expected_digest,
                     "Invalid PrePrepare digest: expected {:?}, got {:?}",
@@ -452,13 +477,25 @@ impl<C: PbftCoreCryptoContext> PbftCoreCrypto<C> {
                     pre_prepare.digest
                 );
                 self.context
-                    .verify(bytes, sig, self.params.view_leader(pre_prepare.view_num))?
+                    .verify(bytes, sig, self.params.view_leader(pre_prepare.view_num))
+                    .context("Failed to verify PrePrepare signature")?;
+                let requests =
+                    borsh::from_slice(piggyback_data).context("Failed to deserialize requests")?;
+                PbftMessage::PrePrepare(pre_prepare, requests)
             }
-            PbftMessage::Prepare(prepare) => {
-                self.context.verify(bytes, sig, prepare.replica_index)?
+            PbftVerifiableData::Prepare(prepare) => {
+                self.context
+                    .verify(bytes, sig, prepare.replica_index)
+                    .context("Failed to verify Prepare signature")?;
+                PbftMessage::Prepare(prepare)
             }
-            PbftMessage::Commit(commit) => self.context.verify(bytes, sig, commit.replica_index)?,
-        }
+            PbftVerifiableData::Commit(commit) => {
+                self.context
+                    .verify(bytes, sig, commit.replica_index)
+                    .context("Failed to verify Commit signature")?;
+                PbftMessage::Commit(commit)
+            }
+        };
         Ok(message)
     }
 }

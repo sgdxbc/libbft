@@ -235,15 +235,8 @@ impl<C: core::PbftCoreCryptoContext> Emit<events::SignedMessage<C::Sig>>
 impl<C: core::PbftCoreCryptoContext> PbftCryptoVerifyWorker<C> {
     pub async fn run(&mut self, token: &CancellationToken) {
         while let Some(Some(bytes)) = token.run_until_cancelled(self.bytes_rx.recv()).await {
-            let Some((message_bytes, sig_bytes)) =
-                bytes.split_at_checked(bytes.len() - C::Sig::bytes_len())
-            else {
-                warn!("Received bytes too short to contain signature");
-                continue;
-            };
-            let sig = C::Sig::from_bytes(sig_bytes);
-            match self.core_crypto.verify(message_bytes, &sig) {
-                Ok(message) => {
+            match self.decode(&bytes) {
+                Ok((message, sig)) => {
                     if let Err(err) = self
                         .signed_message_tx
                         .as_ref()
@@ -254,11 +247,26 @@ impl<C: core::PbftCoreCryptoContext> PbftCryptoVerifyWorker<C> {
                         warn!("Failed to send verified message to node: {err:#}");
                     }
                 }
-                Err(err) => {
-                    warn!("Failed to verify message: {err:#}");
-                }
+                Err(err) => warn!("Failed to decode and verify message: {err:#}"),
             }
         }
+    }
+
+    fn decode(&self, bytes: &[u8]) -> anyhow::Result<(core::PbftMessage, C::Sig)> {
+        anyhow::ensure!(
+            bytes.len() >= 4,
+            "Received bytes too short to contain data length"
+        );
+        let data_len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        let Some((bytes, piggyback_data)) = &bytes[4..].split_at_checked(data_len) else {
+            anyhow::bail!("Received bytes too short to contain data");
+        };
+        let Some((sig_bytes, data_bytes)) = bytes.split_at_checked(C::Sig::bytes_len()) else {
+            anyhow::bail!("Received bytes too short to contain signature");
+        };
+        let sig = C::Sig::from_bytes(sig_bytes);
+        let message = self.core_crypto.verify(data_bytes, &sig, piggyback_data)?;
+        Ok((message, sig))
     }
 }
 
@@ -315,9 +323,15 @@ impl<C: core::PbftCoreCryptoContext> PbftCryptoSignWorker<C> {
         while let Some(Some((recipient, mut message))) =
             token.run_until_cancelled(self.message_rx.recv()).await
         {
-            let (mut bytes, sig) = self.core_crypto.sign(&mut message);
-            bytes.extend_from_slice(sig.as_bytes());
-            let bytes = bytes.into();
+            let (bytes, sig, piggyback_data) = self.core_crypto.sign(&mut message);
+            let data_bytes = [sig.as_bytes(), &bytes].concat();
+            let bytes = [
+                &(data_bytes.len() as u32).to_le_bytes()[..],
+                &data_bytes,
+                &piggyback_data,
+            ]
+            .concat()
+            .into();
             match recipient {
                 Recipient::To(to) => {
                     if let Err(err) = self.bytes_tx_map.as_ref().unwrap()[&to].send(bytes).await {
@@ -337,7 +351,7 @@ impl<C: core::PbftCoreCryptoContext> PbftCryptoSignWorker<C> {
                         .send((message, sig))
                         .await
                     {
-                        warn!("Failed to send signed message to node: {err:#}");
+                        warn!("Failed to loopback signed message: {err:#}");
                     }
                 }
             }
