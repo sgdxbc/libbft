@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, btree_map::Entry};
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use metrics::counter;
+use metrics::{counter, gauge};
 use tokio::time::Instant;
 use tracing::{info, instrument, warn};
 
@@ -185,7 +185,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
             return;
         }
         self.pending_requests.push(request);
-        if self.seq_num < self.executed_seq_num + self.config.window_size {
+        if self.seq_num < self.last_stable() + self.config.window_size {
             self.close_batch().await;
         }
     }
@@ -233,6 +233,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
                     },
                 );
                 assert!(replaced.is_none());
+                gauge!("pbft.log_size").set(self.log.len() as f64);
 
                 if let Some(prepares) = self.reorder_prepares.remove(&seq_num) {
                     for (prepare, sig) in prepares {
@@ -273,9 +274,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
 
     #[instrument(skip(self), fields(replica_index = self.config.replica_index))]
     pub async fn on_checkpoint(&mut self, seq_num: SeqNum, state_digest: Digest) {
-        if let Some(stable_seq_num) = self.last_stable()
-            && seq_num <= stable_seq_num
-        {
+        if seq_num <= self.last_stable() {
             return;
         }
         self.checkpoint_proofs.insert(
@@ -306,11 +305,12 @@ impl<C: PbftCoreContext> PbftCore<C> {
         //
     }
 
-    fn last_stable(&self) -> Option<SeqNum> {
+    fn last_stable(&self) -> SeqNum {
         self.checkpoint_proofs
             .first_key_value()
             .filter(|(_, proof)| self.config.params.checkpoint_stable(proof))
             .map(|(&seq_num, _)| seq_num)
+            .unwrap_or(0)
     }
 
     async fn close_batch(&mut self) {
@@ -369,6 +369,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
             signed_prepares: Default::default(),
             signed_commits: Default::default(),
         });
+        gauge!("pbft.log_size").set(self.log.len() as f64);
         if let Some(prepares) = self.reorder_prepares.remove(&seq_num) {
             for (prepare, sig) in prepares {
                 self.handle_prepare(prepare, sig).await;
@@ -487,17 +488,10 @@ impl<C: PbftCoreContext> PbftCore<C> {
                 .deliver(self.executed_seq_num, slot.requests.clone(), self.view_num)
                 .await;
         }
-        if self.seq_num < self.executed_seq_num + self.config.window_size
-            && !self.pending_requests.is_empty()
-        {
-            self.close_batch().await;
-        }
     }
 
     async fn handle_checkpoint(&mut self, checkpoint: Checkpoint, sig: C::Sig) {
-        if let Some(stable_seq_num) = self.last_stable()
-            && checkpoint.seq_num <= stable_seq_num
-        {
+        if checkpoint.seq_num <= self.last_stable() {
             return;
         }
         let seq_num = checkpoint.seq_num;
@@ -529,6 +523,14 @@ impl<C: PbftCoreContext> PbftCore<C> {
             self.log = self.log.split_off(&(seq_num + 1));
             self.checkpoint_proofs = self.checkpoint_proofs.split_off(&seq_num);
             self.reorder_checkpoints = self.reorder_checkpoints.split_off(&(seq_num + 1));
+            gauge!("pbft.log_size").set(self.log.len() as f64);
+
+            if self.config.is_view_leader(self.view_num)
+                && self.seq_num < self.last_stable() + self.config.window_size
+                && !self.pending_requests.is_empty()
+            {
+                self.close_batch().await;
+            }
         }
     }
 }
