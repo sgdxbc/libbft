@@ -1,6 +1,7 @@
 use std::collections::{HashMap, hash_map::Entry};
 
 use borsh::{BorshDeserialize, BorshSerialize};
+use metrics::counter;
 use tokio::time::Instant;
 use tracing::{info, instrument, warn};
 
@@ -26,11 +27,7 @@ pub trait PbftCoreContext {
     // "message" is short for "peer message" in this codebase
 
     // sign `message` and send message along with the signature to `to`
-    fn send_message(
-        &mut self,
-        to: ReplicaIndex,
-        message: PbftMessage,
-    ) -> impl Future<Output = ()>;
+    fn send_message(&mut self, to: ReplicaIndex, message: PbftMessage) -> impl Future<Output = ()>;
 
     // sign `message` and broadcast message along with the signature, and call
     // `handle_loopback_message` with the message and signature
@@ -391,6 +388,10 @@ impl<C: PbftCoreContext> PbftCore<C> {
             if !self.config.params.slot_committed(slot) {
                 break;
             }
+
+            counter!("pbft.committed_slots").increment(1);
+            counter!("pbft.committed_requests").increment(slot.requests.len() as _);
+
             self.context
                 .deliver(slot.requests.clone(), self.view_num)
                 .await;

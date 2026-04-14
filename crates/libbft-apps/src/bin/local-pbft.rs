@@ -20,7 +20,7 @@ use opentelemetry_semantic_conventions::{
     SCHEMA_URL,
     attribute::{DEPLOYMENT_ENVIRONMENT_NAME, SERVICE_VERSION},
 };
-use tokio::{sync::mpsc::channel, task::JoinSet};
+use tokio::{signal::ctrl_c, sync::mpsc::channel, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{Level, info_span};
 use tracing_opentelemetry::OpenTelemetryLayer;
@@ -36,6 +36,9 @@ fn params() -> PbftParams {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let tracer_provider = init_tracing_subscriber();
+    metrics_exporter_prometheus::PrometheusBuilder::new()
+        .with_recommended_naming(true)
+        .install()?;
 
     let mut fabric_bytes_rx_vec = Vec::new();
     let mut fabric_bytes_tx_map = HashMap::new();
@@ -105,18 +108,34 @@ async fn main() -> anyhow::Result<()> {
     }
     let request_tx = request_tx.unwrap();
     let workload = async move {
-        let span = info_span!("Workload");
-        request_tx
-            .send((PbftRequest(b"hello".into()), span))
-            .await
-            .context("request")?;
-        for (i, mut deliver_rx) in deliver_rx_vec.into_iter().enumerate() {
-            deliver_rx
-                .recv()
-                .await
-                .context(format!("Node {i} deliver"))?;
-            tracing::info!("Node {i} delivered");
+        let mut count = 0;
+        loop {
+            let round = async {
+                let span = info_span!("Workload", round = count);
+                request_tx
+                    .send((PbftRequest(b"hello".into()), span))
+                    .await
+                    .context("request")?;
+                for (i, deliver_rx) in deliver_rx_vec.iter_mut().enumerate() {
+                    deliver_rx
+                        .recv()
+                        .await
+                        .with_context(|| format!("Node {i} deliver round {count}"))?;
+                    tracing::debug!("Node {i} delivered");
+                }
+                anyhow::Ok(())
+            };
+            tokio::select! {
+                res = round => res?,
+                res = ctrl_c() => {
+                    eprintln!();
+                    res.context("Failed to listen for Ctrl+C")?;
+                    break;
+                }
+            }
+            count += 1;
         }
+        tracing::info!("Finished {count} rounds");
         anyhow::Ok(())
     };
     join_set.spawn(async move {
@@ -161,7 +180,7 @@ fn init_tracer_provider() -> SdkTracerProvider {
     SdkTracerProvider::builder()
         // Customize sampling strategy
         .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
-            1.0,
+            0.01,
         ))))
         // If export trace to AWS X-Ray, you can use XrayIdGenerator
         .with_id_generator(RandomIdGenerator::default())

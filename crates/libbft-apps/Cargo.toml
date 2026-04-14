@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.102"
 libbft = { version = "0.1.0", path = "../libbft" }
+metrics-exporter-prometheus = { version = "0.18.1", default-features = false, features = ["http-listener"] }
 opentelemetry = "0.31.0"
 opentelemetry-otlp = "0.31.1"
 opentelemetry-semantic-conventions = { version = "0.31.0", features = ["semconv_experimental"] }
