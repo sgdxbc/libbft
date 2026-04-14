@@ -35,7 +35,6 @@ fn params() -> PbftParams {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
     let tracer_provider = init_tracing_subscriber();
 
     let mut fabric_bytes_rx_vec = Vec::new();
@@ -126,11 +125,13 @@ async fn main() -> anyhow::Result<()> {
         }
         token.cancel();
     });
-
     while let Some(res) = join_set.join_next().await {
         res.unwrap()
     }
-    tracer_provider.shutdown()?;
+
+    if let Some(tracer_provider) = tracer_provider {
+        tracer_provider.shutdown()?;
+    }
     Ok(())
 }
 
@@ -151,6 +152,7 @@ fn resource() -> Resource {
 
 // Construct TracerProvider for OpenTelemetryLayer
 fn init_tracer_provider() -> SdkTracerProvider {
+    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_http()
         .build()
@@ -168,18 +170,13 @@ fn init_tracer_provider() -> SdkTracerProvider {
         .build()
 }
 
-// Initialize tracing-subscriber and return OtelGuard for opentelemetry-related termination processing
-fn init_tracing_subscriber() -> SdkTracerProvider {
-    let tracer_provider = init_tracer_provider();
-
-    let tracer = tracer_provider.tracer(env!("CARGO_PKG_NAME"));
-
+fn init_tracing_subscriber() -> Option<SdkTracerProvider> {
     let targets = if let Ok(filter) = std::env::var("RUST_LOG") {
         filter.parse().unwrap()
     } else {
         Targets::new()
     };
-    tracing_subscriber::registry()
+    let subscriber = tracing_subscriber::registry()
         // The global level filter prevents the exporter network stack
         // from reentering the globally installed OpenTelemetryLayer with
         // its own spans while exporting, as the libraries should not use
@@ -190,9 +187,14 @@ fn init_tracing_subscriber() -> SdkTracerProvider {
         .with(tracing_subscriber::filter::LevelFilter::from_level(
             Level::INFO,
         ))
-        .with(tracing_subscriber::fmt::layer().with_filter(targets))
-        .with(OpenTelemetryLayer::new(tracer))
-        .init();
-
-    tracer_provider
+        .with(tracing_subscriber::fmt::layer().with_filter(targets));
+    if std::env::var("OTEL_SDK_DISABLED") != Ok("true".into()) {
+        let tracer_provider = init_tracer_provider();
+        let tracer = tracer_provider.tracer(env!("CARGO_PKG_NAME"));
+        subscriber.with(OpenTelemetryLayer::new(tracer)).init();
+        Some(tracer_provider)
+    } else {
+        subscriber.init();
+        None
+    }
 }
