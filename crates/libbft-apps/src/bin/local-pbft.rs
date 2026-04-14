@@ -11,11 +11,7 @@ use libbft::{
     types::ReplicaIndex,
 };
 use opentelemetry::{KeyValue, trace::TracerProvider as _};
-use opentelemetry_sdk::{
-    Resource,
-    propagation::TraceContextPropagator,
-    trace::{RandomIdGenerator, Sampler, SdkTracerProvider},
-};
+use opentelemetry_sdk::{Resource, propagation::TraceContextPropagator, trace::SdkTracerProvider};
 use opentelemetry_semantic_conventions::{
     SCHEMA_URL,
     attribute::{DEPLOYMENT_ENVIRONMENT_NAME, SERVICE_VERSION},
@@ -109,8 +105,8 @@ async fn main() -> anyhow::Result<()> {
     let request_tx = request_tx.unwrap();
     let workload = async move {
         let mut count = 0;
-        loop {
-            let round = async {
+        let rounds = async {
+            loop {
                 let span = info_span!("Workload", round = count);
                 request_tx
                     .send((PbftRequest(b"hello".into()), span))
@@ -123,17 +119,17 @@ async fn main() -> anyhow::Result<()> {
                         .with_context(|| format!("Node {i} deliver round {count}"))?;
                     tracing::debug!("Node {i} delivered");
                 }
-                anyhow::Ok(())
-            };
-            tokio::select! {
-                res = round => res?,
-                res = ctrl_c() => {
-                    eprintln!();
-                    res.context("Failed to listen for Ctrl+C")?;
-                    break;
-                }
+                count += 1;
             }
-            count += 1;
+            #[allow(unreachable_code)]
+            anyhow::Ok(())
+        };
+        tokio::select! {
+            res = rounds => res?,
+            res = ctrl_c() => {
+                eprintln!();
+                res.context("Failed to listen for Ctrl+C")?;
+            }
         }
         tracing::info!("Finished {count} rounds");
         anyhow::Ok(())
@@ -179,11 +175,11 @@ fn init_tracer_provider() -> SdkTracerProvider {
 
     SdkTracerProvider::builder()
         // Customize sampling strategy
-        .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
-            0.01,
-        ))))
+        // .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
+        //     0.01,
+        // ))))
         // If export trace to AWS X-Ray, you can use XrayIdGenerator
-        .with_id_generator(RandomIdGenerator::default())
+        // .with_id_generator(RandomIdGenerator::default())
         .with_resource(resource())
         .with_batch_exporter(exporter)
         .build()

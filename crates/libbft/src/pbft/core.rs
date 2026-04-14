@@ -113,7 +113,7 @@ impl PbftParams {
     }
 
     fn slot_prepared<S>(&self, slot: &LogSlot<S>) -> bool {
-        slot.signed_prepares.len() >= self.num_replicas - self.num_faulty_replicas
+        slot.signed_prepares.len() + 1 >= self.num_replicas - self.num_faulty_replicas
     }
 
     fn slot_committed<S>(&self, slot: &LogSlot<S>) -> bool {
@@ -190,8 +190,9 @@ impl<C: PbftCoreContext> PbftCore<C> {
         }
         match message {
             PbftMessage::PrePrepare(pre_prepare, requests) => {
+                let seq_num = pre_prepare.seq_num;
                 let replaced = self.log.insert(
-                    pre_prepare.seq_num,
+                    seq_num,
                     LogSlot {
                         requests,
                         signed_pre_prepare: (pre_prepare, sig),
@@ -200,6 +201,17 @@ impl<C: PbftCoreContext> PbftCore<C> {
                     },
                 );
                 assert!(replaced.is_none());
+
+                if let Some(prepares) = self.reorder_prepares.remove(&seq_num) {
+                    for (prepare, sig) in prepares {
+                        self.handle_prepare(prepare, sig).await;
+                    }
+                }
+                if let Some(commits) = self.reorder_commits.remove(&seq_num) {
+                    for (commit, sig) in commits {
+                        self.handle_commit(commit, sig).await;
+                    }
+                }
             }
             PbftMessage::Prepare(prepare) => {
                 if self
@@ -270,12 +282,6 @@ impl<C: PbftCoreContext> PbftCore<C> {
             return;
         }
         let digest = pre_prepare.digest.clone();
-        slot.insert_entry(LogSlot {
-            requests,
-            signed_pre_prepare: (pre_prepare, sig),
-            signed_prepares: Default::default(),
-            signed_commits: Default::default(),
-        });
         let prepare = Prepare {
             view_num: self.view_num,
             seq_num,
@@ -285,6 +291,13 @@ impl<C: PbftCoreContext> PbftCore<C> {
         self.context
             .broadcast_message(PbftMessage::Prepare(prepare))
             .await;
+
+        slot.insert_entry(LogSlot {
+            requests,
+            signed_pre_prepare: (pre_prepare, sig),
+            signed_prepares: Default::default(),
+            signed_commits: Default::default(),
+        });
         if let Some(prepares) = self.reorder_prepares.remove(&seq_num) {
             for (prepare, sig) in prepares {
                 self.handle_prepare(prepare, sig).await;
