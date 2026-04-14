@@ -5,8 +5,8 @@ use crate::crypto::CryptoKit;
 
 use super::core::{Commit, PbftMessage, PbftParams, PrePrepare, Prepare};
 
-pub trait PbftCryptoContext: CryptoKit + Send {}
-impl<C: CryptoKit + Send> PbftCryptoContext for C {}
+pub trait PbftCryptoContext: CryptoKit {}
+impl<C: CryptoKit> PbftCryptoContext for C {}
 
 // both ingress and egress (happen to) need these same states
 pub struct PbftWorker<C> {

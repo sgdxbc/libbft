@@ -30,17 +30,17 @@ pub trait PbftCoreContext {
         &mut self,
         to: ReplicaIndex,
         message: PbftMessage,
-    ) -> impl Future<Output = ()> + Send;
+    ) -> impl Future<Output = ()>;
 
     // sign `message` and broadcast message along with the signature, and call
     // `handle_loopback_message` with the message and signature
-    fn broadcast_message(&mut self, message: PbftMessage) -> impl Future<Output = ()> + Send;
+    fn broadcast_message(&mut self, message: PbftMessage) -> impl Future<Output = ()>;
 
     fn deliver(
         &mut self,
         requests: Vec<PbftRequest>,
         view_num: ViewNum,
-    ) -> impl Future<Output = ()> + Send;
+    ) -> impl Future<Output = ()>;
 
     type Sig;
 }
