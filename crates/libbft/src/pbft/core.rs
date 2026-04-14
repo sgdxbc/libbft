@@ -1,4 +1,4 @@
-use std::collections::{HashMap, hash_map::Entry};
+use std::collections::{BTreeMap, HashMap, btree_map::Entry};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use metrics::counter;
@@ -29,12 +29,13 @@ pub trait PbftCoreContext {
     // sign `message` and send message along with the signature to `to`
     fn send_message(&mut self, to: ReplicaIndex, message: PbftMessage) -> impl Future<Output = ()>;
 
-    // sign `message` and broadcast message along with the signature, and call
-    // `handle_loopback_message` with the message and signature
+    // sign `message` and broadcast message along with the signature, and call `on_loopback_message`
+    // with the message and signature
     fn broadcast_message(&mut self, message: PbftMessage) -> impl Future<Output = ()>;
 
     fn deliver(
         &mut self,
+        seq_num: SeqNum,
         requests: Vec<PbftRequest>,
         view_num: ViewNum,
     ) -> impl Future<Output = ()>;
@@ -50,6 +51,7 @@ pub enum PbftMessage {
     PrePrepare(PrePrepare, Vec<PbftRequest>),
     Prepare(Prepare),
     Commit(Commit),
+    Checkpoint(Checkpoint),
 }
 
 #[derive(Debug, BorshSerialize, BorshDeserialize, Clone)]
@@ -75,12 +77,20 @@ pub struct Commit {
     pub replica_index: ReplicaIndex,
 }
 
+#[derive(Debug, BorshSerialize, BorshDeserialize, Clone)]
+pub struct Checkpoint {
+    seq_num: SeqNum,
+    state_digest: Digest,
+    pub replica_index: ReplicaIndex,
+}
+
 impl PbftMessage {
-    fn view_num(&self) -> ViewNum {
+    fn view_num(&self) -> Option<ViewNum> {
         match self {
-            PbftMessage::PrePrepare(pre_prepare, _) => pre_prepare.view_num,
-            PbftMessage::Prepare(prepare) => prepare.view_num,
-            PbftMessage::Commit(commit) => commit.view_num,
+            PbftMessage::PrePrepare(pre_prepare, _) => Some(pre_prepare.view_num),
+            PbftMessage::Prepare(prepare) => Some(prepare.view_num),
+            PbftMessage::Commit(commit) => Some(commit.view_num),
+            PbftMessage::Checkpoint(_) => None,
         }
     }
 }
@@ -91,11 +101,14 @@ pub struct PbftCore<C: PbftCoreContext> {
     view_num: ViewNum,
     seq_num: SeqNum,
     pending_requests: Vec<PbftRequest>,
-    log: HashMap<SeqNum, LogSlot<C::Sig>>,
+    log: BTreeMap<SeqNum, LogSlot<C::Sig>>,
     executed_seq_num: SeqNum,
+    // invariant: every proof except the first one (i.e. with smallest seq num) is not stable
+    checkpoint_proofs: BTreeMap<SeqNum, CheckpointProof<C::Sig>>,
 
     reorder_prepares: HashMap<SeqNum, Vec<(Prepare, C::Sig)>>,
     reorder_commits: HashMap<SeqNum, Vec<(Commit, C::Sig)>>,
+    reorder_checkpoints: BTreeMap<SeqNum, Vec<(Checkpoint, C::Sig)>>,
     // TODO reorder messages from later views
 }
 
@@ -105,6 +118,12 @@ struct LogSlot<S> {
     signed_pre_prepare: (PrePrepare, S),
     signed_prepares: HashMap<ReplicaIndex, (Prepare, S)>,
     signed_commits: HashMap<ReplicaIndex, (Commit, S)>,
+}
+
+#[derive(Debug, BorshSerialize, BorshDeserialize)]
+struct CheckpointProof<S> {
+    state_digest: Digest,
+    signed_checkpoints: HashMap<ReplicaIndex, (Checkpoint, S)>,
 }
 
 impl PbftParams {
@@ -118,6 +137,10 @@ impl PbftParams {
 
     fn slot_committed<S>(&self, slot: &LogSlot<S>) -> bool {
         slot.signed_commits.len() >= self.num_replicas - self.num_faulty_replicas
+    }
+
+    fn checkpoint_stable<S>(&self, proof: &CheckpointProof<S>) -> bool {
+        proof.signed_checkpoints.len() >= self.num_replicas - self.num_faulty_replicas
     }
 }
 
@@ -135,8 +158,10 @@ impl<C: PbftCoreContext> PbftCore<C> {
             pending_requests,
             log,
             executed_seq_num,
+            checkpoint_proofs,
             reorder_prepares,
             reorder_commits,
+            reorder_checkpoints,
         ) = Default::default();
         Self {
             context,
@@ -146,13 +171,15 @@ impl<C: PbftCoreContext> PbftCore<C> {
             pending_requests,
             log,
             executed_seq_num,
+            checkpoint_proofs,
             reorder_prepares,
             reorder_commits,
+            reorder_checkpoints,
         }
     }
 
     #[instrument(skip(self), fields(replica_index = self.config.replica_index))]
-    pub async fn handle_request(&mut self, request: PbftRequest) {
+    pub async fn on_request(&mut self, request: PbftRequest) {
         if !self.config.is_view_leader(self.view_num) {
             // TODO set timer
             return;
@@ -165,9 +192,11 @@ impl<C: PbftCoreContext> PbftCore<C> {
 
     // should call with verified messages and their signatures
     #[instrument(skip(self, sig), fields(replica_index = self.config.replica_index))]
-    pub async fn handle_message(&mut self, message: PbftMessage, sig: C::Sig) {
-        if message.view_num() != self.view_num {
-            if message.view_num() > self.view_num {
+    pub async fn on_message(&mut self, message: PbftMessage, sig: C::Sig) {
+        if let Some(view_num) = message.view_num()
+            && view_num != self.view_num
+        {
+            if view_num > self.view_num {
                 // TODO state transfer if necessary
             }
             return;
@@ -178,14 +207,17 @@ impl<C: PbftCoreContext> PbftCore<C> {
             }
             PbftMessage::Prepare(prepare) => self.handle_prepare(prepare, sig).await,
             PbftMessage::Commit(commit) => self.handle_commit(commit, sig).await,
+            PbftMessage::Checkpoint(checkpoint) => self.handle_checkpoint(checkpoint, sig).await,
         }
     }
 
     // trusted loopback messages that may be processed differently or bypass some further validation
     // compared to verified remote messages
     #[instrument(skip(self, sig), fields(replica_index = self.config.replica_index))]
-    pub async fn handle_loopback_message(&mut self, message: PbftMessage, sig: C::Sig) {
-        if message.view_num() != self.view_num {
+    pub async fn on_loopback_message(&mut self, message: PbftMessage, sig: C::Sig) {
+        if let Some(view_num) = message.view_num()
+            && view_num != self.view_num
+        {
             return;
         }
         match message {
@@ -214,32 +246,71 @@ impl<C: PbftCoreContext> PbftCore<C> {
                 }
             }
             PbftMessage::Prepare(prepare) => {
-                if self
-                    .config
-                    .params
-                    .slot_prepared(&self.log[&prepare.seq_num])
+                if prepare.seq_num <= self.executed_seq_num
+                    || self
+                        .config
+                        .params
+                        .slot_prepared(&self.log[&prepare.seq_num])
                 {
                     return;
                 }
                 self.insert_prepare(prepare, sig).await
             }
             PbftMessage::Commit(commit) => {
-                if self
-                    .config
-                    .params
-                    .slot_committed(&self.log[&commit.seq_num])
+                if commit.seq_num <= self.executed_seq_num
+                    || self
+                        .config
+                        .params
+                        .slot_committed(&self.log[&commit.seq_num])
                 {
                     return;
                 }
                 self.insert_commit(commit, sig).await
             }
+            PbftMessage::Checkpoint(checkpoint) => self.handle_checkpoint(checkpoint, sig).await,
         }
     }
 
     #[instrument(skip(self), fields(replica_index = self.config.replica_index))]
-    pub async fn tick(&mut self, now: Instant) {
+    pub async fn on_checkpoint(&mut self, seq_num: SeqNum, state_digest: Digest) {
+        if let Some(stable_seq_num) = self.last_stable()
+            && seq_num <= stable_seq_num
+        {
+            return;
+        }
+        self.checkpoint_proofs.insert(
+            seq_num,
+            CheckpointProof {
+                state_digest: state_digest.clone(),
+                signed_checkpoints: Default::default(),
+            },
+        );
+        let checkpoint = Checkpoint {
+            seq_num,
+            state_digest,
+            replica_index: self.config.replica_index,
+        };
+        self.context
+            .broadcast_message(PbftMessage::Checkpoint(checkpoint))
+            .await;
+        if let Some(checkpoints) = self.reorder_checkpoints.remove(&seq_num) {
+            for (checkpoint, sig) in checkpoints {
+                self.handle_checkpoint(checkpoint, sig).await;
+            }
+        }
+    }
+
+    #[instrument(skip(self), fields(replica_index = self.config.replica_index))]
+    pub async fn on_tick(&mut self, now: Instant) {
         let _ = now;
         //
+    }
+
+    fn last_stable(&self) -> Option<SeqNum> {
+        self.checkpoint_proofs
+            .first_key_value()
+            .filter(|(_, proof)| self.config.params.checkpoint_stable(proof))
+            .map(|(&seq_num, _)| seq_num)
     }
 
     async fn close_batch(&mut self) {
@@ -311,6 +382,9 @@ impl<C: PbftCoreContext> PbftCore<C> {
     }
 
     async fn handle_prepare(&mut self, prepare: Prepare, sig: C::Sig) {
+        if prepare.seq_num <= self.executed_seq_num {
+            return;
+        }
         let Some(slot) = &self.log.get(&prepare.seq_num) else {
             self.reorder_prepares
                 .entry(prepare.seq_num)
@@ -361,6 +435,9 @@ impl<C: PbftCoreContext> PbftCore<C> {
     }
 
     async fn handle_commit(&mut self, commit: Commit, sig: C::Sig) {
+        if commit.seq_num <= self.executed_seq_num {
+            return;
+        }
         let Some(slot) = &self.log.get(&commit.seq_num) else {
             self.reorder_commits
                 .entry(commit.seq_num)
@@ -405,15 +482,53 @@ impl<C: PbftCoreContext> PbftCore<C> {
             counter!("pbft.committed_slots").increment(1);
             counter!("pbft.committed_requests").increment(slot.requests.len() as _);
 
-            self.context
-                .deliver(slot.requests.clone(), self.view_num)
-                .await;
             self.executed_seq_num += 1;
+            self.context
+                .deliver(self.executed_seq_num, slot.requests.clone(), self.view_num)
+                .await;
         }
         if self.seq_num < self.executed_seq_num + self.config.window_size
             && !self.pending_requests.is_empty()
         {
             self.close_batch().await;
+        }
+    }
+
+    async fn handle_checkpoint(&mut self, checkpoint: Checkpoint, sig: C::Sig) {
+        if let Some(stable_seq_num) = self.last_stable()
+            && checkpoint.seq_num <= stable_seq_num
+        {
+            return;
+        }
+        let seq_num = checkpoint.seq_num;
+        let Some(proof) = self.checkpoint_proofs.get_mut(&seq_num) else {
+            self.reorder_checkpoints
+                .entry(checkpoint.seq_num)
+                .or_default()
+                .push((checkpoint, sig));
+            return;
+        };
+        if checkpoint.state_digest != proof.state_digest {
+            warn!(
+                self.config.replica_index,
+                "Conflicting Checkpoint for seq_num {seq_num} from replica {}: expected state digest {:?}, got {:?}",
+                checkpoint.replica_index,
+                proof.state_digest,
+                checkpoint.state_digest
+            );
+            return;
+        }
+        proof
+            .signed_checkpoints
+            .insert(checkpoint.replica_index, (checkpoint, sig));
+        if self.config.params.checkpoint_stable(proof) {
+            info!(
+                self.config.replica_index,
+                "Checkpoint at seq_num {seq_num} is stable"
+            );
+            self.log = self.log.split_off(&(seq_num + 1));
+            self.checkpoint_proofs = self.checkpoint_proofs.split_off(&seq_num);
+            self.reorder_checkpoints = self.reorder_checkpoints.split_off(&(seq_num + 1));
         }
     }
 }

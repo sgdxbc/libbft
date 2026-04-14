@@ -60,7 +60,8 @@ async fn main() -> anyhow::Result<()> {
         let mut egress = PbftEgressWorker::new(DummyCrypto, params());
 
         let emit_request = if i == 0 { &mut request_tx } else { &mut None };
-        protocol.register(emit_request, &mut ingress, &mut egress);
+        let emit_checkpoint = &mut None;
+        protocol.register(emit_request, &mut ingress, &mut egress, emit_checkpoint);
         let mut node_bytes_tx = None;
         ingress.register(&mut node_bytes_tx);
         let node_bytes_tx = node_bytes_tx.unwrap();

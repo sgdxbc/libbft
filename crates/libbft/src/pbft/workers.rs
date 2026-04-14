@@ -1,7 +1,7 @@
 use anyhow::Context;
 use borsh::{BorshDeserialize, BorshSerialize};
 
-use crate::crypto::CryptoKit;
+use crate::{crypto::CryptoKit, pbft::core::Checkpoint};
 
 use super::core::{Commit, PbftMessage, PbftParams, PrePrepare, Prepare};
 
@@ -20,6 +20,7 @@ enum PbftVerifiableData {
     PrePrepare(PrePrepare),
     Prepare(Prepare),
     Commit(Commit),
+    Checkpoint(Checkpoint),
 }
 
 impl<C: PbftCryptoContext> PbftWorker<C> {
@@ -37,6 +38,9 @@ impl<C: PbftCryptoContext> PbftWorker<C> {
             }
             PbftMessage::Prepare(prepare) => PbftVerifiableData::Prepare(prepare.clone()),
             PbftMessage::Commit(commit) => PbftVerifiableData::Commit(commit.clone()),
+            PbftMessage::Checkpoint(checkpoint) => {
+                PbftVerifiableData::Checkpoint(checkpoint.clone())
+            }
         };
         let data_bytes = borsh::to_vec(&verifiable_data).unwrap();
         let sig = self.context.sign(&borsh::to_vec(&verifiable_data).unwrap());
@@ -93,6 +97,12 @@ impl<C: PbftCryptoContext> PbftWorker<C> {
                     .verify(bytes, sig, commit.replica_index)
                     .context("Failed to verify Commit signature")?;
                 PbftMessage::Commit(commit)
+            }
+            PbftVerifiableData::Checkpoint(checkpoint) => {
+                self.context
+                    .verify(bytes, sig, checkpoint.replica_index)
+                    .context("Failed to verify Checkpoint signature")?;
+                PbftMessage::Checkpoint(checkpoint)
             }
         };
         Ok(message)

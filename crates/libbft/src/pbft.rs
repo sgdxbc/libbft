@@ -49,7 +49,12 @@ pub mod events {
 
     pub struct Deliver;
     impl Event for Deliver {
-        type Type = (Vec<core::PbftRequest>, core::ViewNum);
+        type Type = (core::SeqNum, Vec<core::PbftRequest>, core::ViewNum);
+    }
+
+    pub struct Checkpoint;
+    impl Event for Checkpoint {
+        type Type = (core::SeqNum, core::Digest);
     }
 
     pub struct HandleBytes;
@@ -72,6 +77,8 @@ pub struct PbftProtocol<C: workers::PbftCryptoContext> {
     signed_message_rx: EventReceiver<events::SignedMessage<C::Sig>>,
     loopback_tx: EventSender<events::LoopbackMessage<C::Sig>>,
     loopback_rx: EventReceiver<events::LoopbackMessage<C::Sig>>,
+    checkpoint_tx: EventSender<events::Checkpoint>,
+    checkpoint_rx: EventReceiver<events::Checkpoint>,
 }
 
 pub struct PbftCoreContextState<C: workers::PbftCryptoContext> {
@@ -86,6 +93,7 @@ impl<C: workers::PbftCryptoContext> PbftProtocol<C> {
         let (request_tx, request_rx) = channel(1000);
         let (signed_message_tx, signed_message_rx) = channel(1000);
         let (loopback_tx, loopback_rx) = channel(1000);
+        let (checkpoint_tx, checkpoint_rx) = channel(1000);
         let core_context = PbftCoreContextState {
             message_tx: None,
             deliver_tx: None,
@@ -100,6 +108,8 @@ impl<C: workers::PbftCryptoContext> PbftProtocol<C> {
             signed_message_rx,
             loopback_tx,
             loopback_rx,
+            checkpoint_tx,
+            checkpoint_rx,
         }
     }
 
@@ -108,10 +118,12 @@ impl<C: workers::PbftCryptoContext> PbftProtocol<C> {
         emit_request: &mut impl Emit<events::HandleRequest>,
         emit_signed_message: &mut impl Emit<events::SignedMessage<C::Sig>>,
         emit_loopback_message: &mut impl Emit<events::LoopbackMessage<C::Sig>>,
+        emit_checkpoint: &mut impl Emit<events::Checkpoint>,
     ) {
         emit_request.set_tx(self.request_tx.clone());
         emit_signed_message.set_tx(self.signed_message_tx.clone());
         emit_loopback_message.set_tx(self.loopback_tx.clone());
+        emit_checkpoint.set_tx(self.checkpoint_tx.clone());
     }
 }
 
@@ -137,16 +149,19 @@ impl<C: workers::PbftCryptoContext> PbftProtocol<C> {
                 }
 
                 Some((request, span)) = self.request_rx.recv() => {
-                    self.core.handle_request(request).instrument(span).await;
+                    self.core.on_request(request).instrument(span).await;
                 }
                 Some(((message, sig), span)) = self.signed_message_rx.recv() => {
-                    self.core.handle_message(message, sig).instrument(span).await;
+                    self.core.on_message(message, sig).instrument(span).await;
                 }
                 Some(((message, sig), span)) = self.loopback_rx.recv() => {
-                    self.core.handle_loopback_message(message, sig).instrument(span).await;
+                    self.core.on_loopback_message(message, sig).instrument(span).await;
+                }
+                Some(((seq_num, state_digest), span)) = self.checkpoint_rx.recv() => {
+                    self.core.on_checkpoint(seq_num, state_digest).instrument(span).await;
                 }
                 now = interval.tick() => {
-                    self.core.tick(now).await;
+                    self.core.on_tick(now).await;
                 }
             }
         }
@@ -179,12 +194,17 @@ impl<C: workers::PbftCryptoContext> core::PbftCoreContext for PbftCoreContextSta
         }
     }
 
-    async fn deliver(&mut self, requests: Vec<core::PbftRequest>, view_num: core::ViewNum) {
+    async fn deliver(
+        &mut self,
+        seq_num: core::SeqNum,
+        requests: Vec<core::PbftRequest>,
+        view_num: core::ViewNum,
+    ) {
         if let Err(err) = self
             .deliver_tx
             .as_ref()
             .unwrap()
-            .send(((requests, view_num), Span::current()))
+            .send(((seq_num, requests, view_num), Span::current()))
             .await
         {
             warn!("Failed to deliver requests: {err:#}");
