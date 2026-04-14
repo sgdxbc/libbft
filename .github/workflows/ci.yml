@@ -1,0 +1,39 @@
+name: Build & Run Apps
+
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        toolchain: [stable, beta]
+
+    steps:
+    - uses: actions/checkout@v4
+    # https://github.com/actions/cache/blob/main/examples.md#rust---cargo
+    - name: Modify the rust toolchain version
+      run: rustup override set ${{ matrix.toolchain }}
+    - name: Cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+    - name: Build
+      run: cargo build --verbose --release --all-targets
+    - name: Run apps
+      run: ./scripts/run-app.sh local-pbft

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, env::var, time::Duration};
 
 use anyhow::Context;
 use libbft::{
@@ -16,7 +16,7 @@ use opentelemetry_semantic_conventions::{
     SCHEMA_URL,
     attribute::{DEPLOYMENT_ENVIRONMENT_NAME, SERVICE_VERSION},
 };
-use tokio::{signal::ctrl_c, sync::mpsc::channel, task::JoinSet};
+use tokio::{signal::ctrl_c, sync::mpsc::channel, task::JoinSet, time::sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{Level, info_span};
 use tracing_opentelemetry::OpenTelemetryLayer;
@@ -124,9 +124,17 @@ async fn main() -> anyhow::Result<()> {
             #[allow(unreachable_code)]
             anyhow::Ok(())
         };
+        let interrupt = async {
+            if var("CI") == Ok("true".into()) {
+                sleep(Duration::from_secs(3)).await;
+            } else {
+                ctrl_c().await.context("Failed to listen for Ctrl+C")?;
+            }
+            anyhow::Ok(())
+        };
         tokio::select! {
             res = rounds => res?,
-            res = ctrl_c() => {
+            res = interrupt => {
                 eprintln!();
                 res.context("Failed to listen for Ctrl+C")?;
             }
