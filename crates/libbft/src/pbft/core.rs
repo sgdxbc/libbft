@@ -24,9 +24,10 @@ pub struct PbftCoreConfig {
 }
 
 pub trait PbftCoreContext {
-    // "message" is short for "peer message" in this codebase
+    type Sig;
 
     // sign `message` and send message along with the signature to `to`
+    // "message" is short for "peer message" in this codebase
     fn send_message(&mut self, to: ReplicaIndex, message: PbftMessage) -> impl Future<Output = ()>;
 
     // sign `message` and broadcast message along with the signature, and call `on_loopback_message`
@@ -39,8 +40,6 @@ pub trait PbftCoreContext {
         requests: Vec<PbftRequest>,
         view_num: ViewNum,
     ) -> impl Future<Output = ()>;
-
-    type Sig;
 }
 
 #[derive(Debug, BorshSerialize, BorshDeserialize, Clone)]
@@ -91,6 +90,15 @@ impl PbftMessage {
             PbftMessage::Prepare(prepare) => Some(prepare.view_num),
             PbftMessage::Commit(commit) => Some(commit.view_num),
             PbftMessage::Checkpoint(_) => None,
+        }
+    }
+
+    fn seq_num(&self) -> SeqNum {
+        match self {
+            PbftMessage::PrePrepare(pre_prepare, _) => pre_prepare.seq_num,
+            PbftMessage::Prepare(prepare) => prepare.seq_num,
+            PbftMessage::Commit(commit) => commit.seq_num,
+            PbftMessage::Checkpoint(checkpoint) => checkpoint.seq_num,
         }
     }
 }
@@ -201,6 +209,11 @@ impl<C: PbftCoreContext> PbftCore<C> {
             }
             return;
         }
+        if !matches!(message, PbftMessage::Checkpoint(_))
+            && message.seq_num() <= self.executed_seq_num
+        {
+            return;
+        }
         match message {
             PbftMessage::PrePrepare(pre_prepare, requests) => {
                 self.handle_pre_prepare(pre_prepare, requests, sig).await
@@ -218,6 +231,12 @@ impl<C: PbftCoreContext> PbftCore<C> {
         if let Some(view_num) = message.view_num()
             && view_num != self.view_num
         {
+            return;
+        }
+        if !matches!(message, PbftMessage::Checkpoint(_))
+            && message.seq_num() <= self.executed_seq_num
+        {
+            assert!(!matches!(message, PbftMessage::PrePrepare(_, _)));
             return;
         }
         match message {
@@ -248,22 +267,20 @@ impl<C: PbftCoreContext> PbftCore<C> {
                 }
             }
             PbftMessage::Prepare(prepare) => {
-                if prepare.seq_num <= self.executed_seq_num
-                    || self
-                        .config
-                        .params
-                        .slot_prepared(&self.log[&prepare.seq_num])
+                if self
+                    .config
+                    .params
+                    .slot_prepared(&self.log[&prepare.seq_num])
                 {
                     return;
                 }
                 self.insert_prepare(prepare, sig).await
             }
             PbftMessage::Commit(commit) => {
-                if commit.seq_num <= self.executed_seq_num
-                    || self
-                        .config
-                        .params
-                        .slot_committed(&self.log[&commit.seq_num])
+                if self
+                    .config
+                    .params
+                    .slot_committed(&self.log[&commit.seq_num])
                 {
                     return;
                 }
@@ -338,6 +355,16 @@ impl<C: PbftCoreContext> PbftCore<C> {
         sig: C::Sig,
     ) {
         let seq_num = pre_prepare.seq_num;
+        if seq_num > self.last_stable() + self.config.window_size {
+            warn!(
+                self.config.replica_index,
+                "Received PrePrepare for seq_num {seq_num} which is outside the window (last stable: {}, window size: {})",
+                self.last_stable(),
+                self.config.window_size
+            );
+            return;
+        }
+
         let slot = self.log.entry(seq_num);
         if let Entry::Occupied(slot) = slot {
             let (existing_pre_prepare, _) = &slot.get().signed_pre_prepare;
@@ -372,6 +399,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
         });
         gauge!("pbft_log_size", "replica_index" => self.config.replica_index.to_string())
             .set(self.log.len() as f64);
+
         if let Some(prepares) = self.reorder_prepares.remove(&seq_num) {
             for (prepare, sig) in prepares {
                 self.handle_prepare(prepare, sig).await;
@@ -385,9 +413,6 @@ impl<C: PbftCoreContext> PbftCore<C> {
     }
 
     async fn handle_prepare(&mut self, prepare: Prepare, sig: C::Sig) {
-        if prepare.seq_num <= self.executed_seq_num {
-            return;
-        }
         let Some(slot) = &self.log.get(&prepare.seq_num) else {
             self.reorder_prepares
                 .entry(prepare.seq_num)
@@ -438,9 +463,6 @@ impl<C: PbftCoreContext> PbftCore<C> {
     }
 
     async fn handle_commit(&mut self, commit: Commit, sig: C::Sig) {
-        if commit.seq_num <= self.executed_seq_num {
-            return;
-        }
         let Some(slot) = &self.log.get(&commit.seq_num) else {
             self.reorder_commits
                 .entry(commit.seq_num)

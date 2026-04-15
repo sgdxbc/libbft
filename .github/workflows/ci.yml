@@ -19,21 +19,13 @@ jobs:
         toolchain: [stable, beta]
 
     steps:
-    - uses: actions/checkout@v4
-    # https://github.com/actions/cache/blob/main/examples.md#rust---cargo
+    - uses: actions/checkout@v6
     - name: Modify the rust toolchain version
       run: rustup override set ${{ matrix.toolchain }}
-    - name: Cache
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
-          target/
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+    # https://github.com/actions/cache/blob/main/examples.md#rust---cargo
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
     - name: Build
       run: cargo build --verbose --release --all-targets
     - name: Run apps
-      run: ./scripts/run-app.sh local-pbft
+      run: ./scripts/run-app.sh local-pbft | grep -E "Finished [1-9][0-9]{3,} rounds"
