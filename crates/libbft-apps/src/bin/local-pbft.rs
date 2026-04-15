@@ -1,9 +1,9 @@
-use std::{collections::HashMap, env::var, time::Duration};
+use std::{collections::HashMap, env::var, net::SocketAddr, time::Duration};
 
 use anyhow::Context;
 use libbft::{
     crypto::{Digest, DummyCrypto},
-    event::{Emit, EmitMap},
+    event::Emit,
     pbft::{
         PbftCoreConfig, PbftEgressWorker, PbftIngressWorker, PbftParams, PbftProtocol, PbftRequest,
         events::{Deliver, SendBytes},
@@ -29,6 +29,10 @@ fn params() -> PbftParams {
     }
 }
 
+fn replica_addr(index: ReplicaIndex) -> SocketAddr {
+    ([10, 0, 0, index + 1], 3000).into()
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let tracer_provider = init_tracing_subscriber();
@@ -36,19 +40,15 @@ async fn main() -> anyhow::Result<()> {
         .with_recommended_naming(true)
         .install()?;
 
-    let mut fabric_bytes_rx_vec = Vec::new();
-    let mut fabric_bytes_tx_map = HashMap::new();
-    for i in 0..params().num_replicas {
-        let (bytes_tx, bytes_rx) = channel(1000);
-        fabric_bytes_tx_map.insert(i as ReplicaIndex, bytes_tx);
-        fabric_bytes_rx_vec.push(bytes_rx);
-    }
-    let mut join_set = JoinSet::new();
+    let (fabric_bytes_tx, mut fabric_bytes_rx) = channel(1000);
     let mut request_tx = None;
     let mut deliver_rx_vec = Vec::new();
     let mut snapshot_tx_vec = Vec::new();
+    let mut node_bytes_tx_map = HashMap::new();
+
     let token = CancellationToken::new();
-    for (i, mut fabric_bytes_rx) in fabric_bytes_rx_vec.into_iter().enumerate() {
+    let mut join_set = JoinSet::new();
+    for i in 0..params().num_replicas {
         let config = PbftCoreConfig {
             params: params(),
             replica_index: i as ReplicaIndex,
@@ -58,7 +58,14 @@ async fn main() -> anyhow::Result<()> {
 
         let mut protocol = PbftProtocol::<DummyCrypto>::new(config);
         let mut ingress = PbftIngressWorker::new(DummyCrypto, params());
-        let mut egress = PbftEgressWorker::new(DummyCrypto, params());
+        let mut egress = PbftEgressWorker::new(
+            DummyCrypto,
+            params(),
+            (0..params().num_replicas)
+                .filter(|&index| index != i)
+                .map(|index| (index as _, replica_addr(index as _)))
+                .collect(),
+        );
 
         let emit_request = if i == 0 { &mut request_tx } else { &mut None };
         let mut snapshot_tx = None;
@@ -67,14 +74,13 @@ async fn main() -> anyhow::Result<()> {
         let mut node_bytes_tx = None;
         ingress.register(&mut node_bytes_tx);
         let node_bytes_tx = node_bytes_tx.unwrap();
+        node_bytes_tx_map.insert(replica_addr(i as _), node_bytes_tx);
         egress.register(&mut protocol);
 
         let (deliver_tx, deliver_rx) = channel(1000);
         Emit::<Deliver>::set_tx(&mut protocol, deliver_tx);
         deliver_rx_vec.push(deliver_rx);
-        let mut fabric_bytes_tx_map = fabric_bytes_tx_map.clone();
-        fabric_bytes_tx_map.remove(&(i as ReplicaIndex));
-        EmitMap::<_, SendBytes>::set_tx_map(&mut egress, fabric_bytes_tx_map);
+        Emit::<SendBytes>::set_tx(&mut egress, fabric_bytes_tx.clone());
 
         join_set.spawn({
             let token = token.clone();
@@ -88,23 +94,25 @@ async fn main() -> anyhow::Result<()> {
             let token = token.clone();
             async move { ingress.run(&token).await }
         });
-        join_set.spawn({
-            let token = token.clone();
-            async move {
-                while let Some(Some((bytes, span))) =
-                    token.run_until_cancelled(fabric_bytes_rx.recv()).await
-                {
-                    let _enter = span.enter();
-                    if let Err(err) = node_bytes_tx
-                        .send((bytes.into(), info_span!("HandleBytes")))
-                        .await
-                    {
-                        tracing::error!("Failed to send bytes to node {i}: {err:#}");
-                    }
-                }
-            }
-        });
     }
+
+    let fabric = async move {
+        while let Some(((receiver_addr, bytes), span)) = fabric_bytes_rx.recv().await {
+            node_bytes_tx_map[&receiver_addr]
+                .send((bytes.into(), span))
+                .await?;
+        }
+        anyhow::Ok(())
+    };
+    join_set.spawn({
+        let token = token.clone();
+        async move {
+            if let Some(Err(err)) = token.run_until_cancelled(fabric).await {
+                tracing::error!("Fabric error: {err:#}");
+            }
+        }
+    });
+
     let request_tx = request_tx.unwrap();
     let workload = async move {
         let mut count = 0;

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
 use tokio::{sync::mpsc::channel, time::interval};
 use tokio_util::sync::CancellationToken;
@@ -6,7 +6,7 @@ use tracing::{Instrument, Span, instrument, warn};
 
 use crate::{
     crypto::Sig as _,
-    event::{Emit, EmitMap, EventReceiver, EventSender},
+    event::{Emit, EventReceiver, EventSender},
     pbft::events::Recipient,
 };
 
@@ -18,6 +18,8 @@ mod workers;
 pub use core::{PbftCoreConfig, PbftParams, PbftRequest};
 
 pub mod events {
+    use std::net::SocketAddr;
+
     use bytes::Bytes;
 
     use crate::{event::Event, pbft::core};
@@ -64,7 +66,7 @@ pub mod events {
 
     pub struct SendBytes;
     impl Event for SendBytes {
-        type Type = Bytes;
+        type Type = (SocketAddr, Bytes);
     }
 }
 
@@ -278,21 +280,27 @@ impl<C: workers::PbftCryptoContext> PbftIngressWorker<C> {
 
 pub struct PbftEgressWorker<C: workers::PbftCryptoContext> {
     state: workers::PbftWorker<C>,
+    replica_addrs: HashMap<core::ReplicaIndex, SocketAddr>, // excluding self
 
     message_tx: EventSender<events::SendMessage>,
     message_rx: EventReceiver<events::SendMessage>,
-    bytes_tx_map: Option<HashMap<core::ReplicaIndex, EventSender<events::SendBytes>>>, // network
-    loopback_tx: Option<EventSender<events::LoopbackMessage<C::Sig>>>,                 // node
+    bytes_tx: Option<EventSender<events::SendBytes>>, // network
+    loopback_tx: Option<EventSender<events::LoopbackMessage<C::Sig>>>, // node
 }
 
 impl<C: workers::PbftCryptoContext> PbftEgressWorker<C> {
-    pub fn new(core_crypto_context: C, params: core::PbftParams) -> Self {
+    pub fn new(
+        core_crypto_context: C,
+        params: core::PbftParams,
+        replica_addrs: HashMap<core::ReplicaIndex, SocketAddr>,
+    ) -> Self {
         let (message_tx, message_rx) = channel(1000);
         Self {
             state: workers::PbftWorker::new(core_crypto_context, params),
+            replica_addrs,
             message_tx,
             message_rx,
-            bytes_tx_map: None,
+            bytes_tx: None,
             loopback_tx: None,
         }
     }
@@ -302,13 +310,9 @@ impl<C: workers::PbftCryptoContext> PbftEgressWorker<C> {
     }
 }
 
-impl<C: workers::PbftCryptoContext> EmitMap<core::ReplicaIndex, events::SendBytes>
-    for PbftEgressWorker<C>
-{
-    fn tx_map_slot(
-        &mut self,
-    ) -> &mut Option<HashMap<core::ReplicaIndex, EventSender<events::SendBytes>>> {
-        &mut self.bytes_tx_map
+impl<C: workers::PbftCryptoContext> Emit<events::SendBytes> for PbftEgressWorker<C> {
+    fn tx_slot(&mut self) -> &mut Option<EventSender<events::SendBytes>> {
+        &mut self.bytes_tx
     }
 }
 
@@ -320,6 +324,8 @@ impl<C: workers::PbftCryptoContext> Emit<events::LoopbackMessage<C::Sig>> for Pb
 
 impl<C: workers::PbftCryptoContext> PbftEgressWorker<C> {
     pub async fn run(&mut self, token: &CancellationToken) {
+        let bytes_tx = self.bytes_tx.as_ref().unwrap();
+        let loopback_tx = self.loopback_tx.as_ref().unwrap();
         while let Some(Some(((recipient, mut message), span))) =
             token.run_until_cancelled(self.message_rx.recv()).await
         {
@@ -327,26 +333,22 @@ impl<C: workers::PbftCryptoContext> PbftEgressWorker<C> {
             let bytes = [sig.as_bytes(), &data_bytes].concat().into();
             match recipient {
                 Recipient::To(to) => {
-                    if let Err(err) = self.bytes_tx_map.as_ref().unwrap()[&to]
-                        .send((bytes, span))
+                    if let Err(err) = bytes_tx
+                        .send(((self.replica_addrs[&to], bytes), span))
                         .await
                     {
                         warn!("Failed to send message to node {to}: {err:#}");
                     }
                 }
                 Recipient::Broadcast => {
-                    for (to, bytes_tx) in self.bytes_tx_map.as_ref().unwrap() {
-                        if let Err(err) = bytes_tx.send((bytes.clone(), span.clone())).await {
-                            warn!("Failed to broadcast message to node {to}: {err:#}");
+                    // why there's `Receiver::recv_many` but no `Sender::send_many`?
+                    for (&index, &addr) in &self.replica_addrs {
+                        if let Err(err) = bytes_tx.send(((addr, bytes.clone()), span.clone())).await
+                        {
+                            warn!("Failed to broadcast message to node {index}: {err:#}");
                         }
                     }
-                    if let Err(err) = self
-                        .loopback_tx
-                        .as_ref()
-                        .unwrap()
-                        .send(((message, sig), span))
-                        .await
-                    {
+                    if let Err(err) = loopback_tx.send(((message, sig), span)).await {
                         warn!("Failed to loopback signed message: {err:#}");
                     }
                 }
