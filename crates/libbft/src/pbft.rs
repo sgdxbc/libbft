@@ -18,10 +18,6 @@ mod workers;
 pub use core::{PbftCoreConfig, PbftParams, PbftRequest};
 
 pub mod events {
-    use std::net::SocketAddr;
-
-    use bytes::Bytes;
-
     use crate::{crypto::SigBytes, event::Event, pbft::core};
 
     pub struct HandleRequest;
@@ -59,15 +55,9 @@ pub mod events {
         type Type = (core::SeqNum, core::Digest);
     }
 
-    pub struct HandleBytes;
-    impl Event for HandleBytes {
-        type Type = Vec<u8>;
-    }
+    pub type HandleBytes = crate::network::events::HandleBytes;
 
-    pub struct SendBytes;
-    impl Event for SendBytes {
-        type Type = (SocketAddr, Bytes);
-    }
+    pub type SendBytes = crate::network::events::SendBytes;
 }
 
 pub struct PbftProtocol {
