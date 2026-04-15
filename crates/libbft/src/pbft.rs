@@ -52,8 +52,8 @@ pub mod events {
         type Type = (core::SeqNum, Vec<core::PbftRequest>, core::ViewNum);
     }
 
-    pub struct Checkpoint;
-    impl Event for Checkpoint {
+    pub struct Snapshot;
+    impl Event for Snapshot {
         type Type = (core::SeqNum, core::Digest);
     }
 
@@ -77,8 +77,8 @@ pub struct PbftProtocol<C: workers::PbftCryptoContext> {
     signed_message_rx: EventReceiver<events::SignedMessage<C::Sig>>,
     loopback_tx: EventSender<events::LoopbackMessage<C::Sig>>,
     loopback_rx: EventReceiver<events::LoopbackMessage<C::Sig>>,
-    checkpoint_tx: EventSender<events::Checkpoint>,
-    checkpoint_rx: EventReceiver<events::Checkpoint>,
+    snapshot_tx: EventSender<events::Snapshot>,
+    snapshot_rx: EventReceiver<events::Snapshot>,
 }
 
 pub struct PbftCoreContextState<C: workers::PbftCryptoContext> {
@@ -108,8 +108,8 @@ impl<C: workers::PbftCryptoContext> PbftProtocol<C> {
             signed_message_rx,
             loopback_tx,
             loopback_rx,
-            checkpoint_tx,
-            checkpoint_rx,
+            snapshot_tx: checkpoint_tx,
+            snapshot_rx: checkpoint_rx,
         }
     }
 
@@ -118,12 +118,12 @@ impl<C: workers::PbftCryptoContext> PbftProtocol<C> {
         emit_request: &mut impl Emit<events::HandleRequest>,
         emit_signed_message: &mut impl Emit<events::SignedMessage<C::Sig>>,
         emit_loopback_message: &mut impl Emit<events::LoopbackMessage<C::Sig>>,
-        emit_checkpoint: &mut impl Emit<events::Checkpoint>,
+        emit_snapshot: &mut impl Emit<events::Snapshot>,
     ) {
         emit_request.set_tx(self.request_tx.clone());
         emit_signed_message.set_tx(self.signed_message_tx.clone());
         emit_loopback_message.set_tx(self.loopback_tx.clone());
-        emit_checkpoint.set_tx(self.checkpoint_tx.clone());
+        emit_snapshot.set_tx(self.snapshot_tx.clone());
     }
 }
 
@@ -157,8 +157,8 @@ impl<C: workers::PbftCryptoContext> PbftProtocol<C> {
                 Some(((message, sig), span)) = self.loopback_rx.recv() => {
                     self.core.on_loopback_message(message, sig).instrument(span).await;
                 }
-                Some(((seq_num, state_digest), span)) = self.checkpoint_rx.recv() => {
-                    self.core.on_checkpoint(seq_num, state_digest).instrument(span).await;
+                Some(((seq_num, state_digest), span)) = self.snapshot_rx.recv() => {
+                    self.core.on_snapshot(seq_num, state_digest).instrument(span).await;
                 }
                 now = interval.tick() => {
                     self.core.on_tick(now).await;

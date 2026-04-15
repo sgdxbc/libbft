@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
     let mut join_set = JoinSet::new();
     let mut request_tx = None;
     let mut deliver_rx_vec = Vec::new();
-    let mut checkpoint_tx_vec = Vec::new();
+    let mut snapshot_tx_vec = Vec::new();
     let token = CancellationToken::new();
     for (i, mut fabric_bytes_rx) in fabric_bytes_rx_vec.into_iter().enumerate() {
         let config = PbftCoreConfig {
@@ -61,9 +61,9 @@ async fn main() -> anyhow::Result<()> {
         let mut egress = PbftEgressWorker::new(DummyCrypto, params());
 
         let emit_request = if i == 0 { &mut request_tx } else { &mut None };
-        let mut checkpoint_tx = None;
-        protocol.register(emit_request, &mut ingress, &mut egress, &mut checkpoint_tx);
-        checkpoint_tx_vec.push(checkpoint_tx.unwrap());
+        let mut snapshot_tx = None;
+        protocol.register(emit_request, &mut ingress, &mut egress, &mut snapshot_tx);
+        snapshot_tx_vec.push(snapshot_tx.unwrap());
         let mut node_bytes_tx = None;
         ingress.register(&mut node_bytes_tx);
         let node_bytes_tx = node_bytes_tx.unwrap();
@@ -124,14 +124,14 @@ async fn main() -> anyhow::Result<()> {
                 }
                 count += 1;
                 if count % 100 == 0 {
-                    for checkpoint_tx in &checkpoint_tx_vec {
-                        checkpoint_tx
+                    for snapshot_tx in &snapshot_tx_vec {
+                        snapshot_tx
                             .send((
                                 (count, Digest([0u8; 32].into())),
-                                info_span!("TriggerCheckpoint", round = count),
+                                info_span!("TriggerSnapshot", round = count),
                             ))
                             .await
-                            .context("Failed to trigger checkpoint")?;
+                            .context("Failed to trigger snapshot")?;
                     }
                 }
             }

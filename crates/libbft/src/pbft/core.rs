@@ -233,7 +233,8 @@ impl<C: PbftCoreContext> PbftCore<C> {
                     },
                 );
                 assert!(replaced.is_none());
-                gauge!("pbft.log_size").set(self.log.len() as f64);
+                gauge!("pbft.log_size", "replica_index" => self.config.replica_index.to_string())
+                    .set(self.log.len() as f64);
 
                 if let Some(prepares) = self.reorder_prepares.remove(&seq_num) {
                     for (prepare, sig) in prepares {
@@ -273,7 +274,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
     }
 
     #[instrument(skip(self), fields(replica_index = self.config.replica_index))]
-    pub async fn on_checkpoint(&mut self, seq_num: SeqNum, state_digest: Digest) {
+    pub async fn on_snapshot(&mut self, seq_num: SeqNum, state_digest: Digest) {
         if seq_num <= self.last_stable() {
             return;
         }
@@ -369,7 +370,8 @@ impl<C: PbftCoreContext> PbftCore<C> {
             signed_prepares: Default::default(),
             signed_commits: Default::default(),
         });
-        gauge!("pbft.log_size").set(self.log.len() as f64);
+        gauge!("pbft_log_size", "replica_index" => self.config.replica_index.to_string())
+            .set(self.log.len() as f64);
         if let Some(prepares) = self.reorder_prepares.remove(&seq_num) {
             for (prepare, sig) in prepares {
                 self.handle_prepare(prepare, sig).await;
@@ -480,8 +482,8 @@ impl<C: PbftCoreContext> PbftCore<C> {
                 break;
             }
 
-            counter!("pbft.committed_slots").increment(1);
-            counter!("pbft.committed_requests").increment(slot.requests.len() as _);
+            counter!("pbft_committed_slots", "replica_index" => self.config.replica_index.to_string()).increment(1);
+            counter!("pbft_committed_requests", "replica_index" => self.config.replica_index.to_string()).increment(slot.requests.len() as _);
 
             self.executed_seq_num += 1;
             self.context
@@ -523,7 +525,8 @@ impl<C: PbftCoreContext> PbftCore<C> {
             self.log = self.log.split_off(&(seq_num + 1));
             self.checkpoint_proofs = self.checkpoint_proofs.split_off(&seq_num);
             self.reorder_checkpoints = self.reorder_checkpoints.split_off(&(seq_num + 1));
-            gauge!("pbft.log_size").set(self.log.len() as f64);
+            gauge!("pbft_log_size", "replica_index" => self.config.replica_index.to_string())
+                .set(self.log.len() as f64);
 
             if self.config.is_view_leader(self.view_num)
                 && self.seq_num < self.last_stable() + self.config.window_size
