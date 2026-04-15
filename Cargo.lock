@@ -616,6 +616,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "libbft",
+ "libbft-network",
  "metrics-exporter-prometheus",
  "opentelemetry",
  "opentelemetry-otlp",

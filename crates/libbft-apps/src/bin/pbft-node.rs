@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env::var, net::SocketAddr, time::Duration};
+use std::net::SocketAddr;
 
 use anyhow::Context;
 use libbft::{
@@ -6,19 +6,20 @@ use libbft::{
     event::Emit,
     pbft::{
         PbftCoreConfig, PbftEgressWorker, PbftIngressWorker, PbftParams, PbftProtocol, PbftRequest,
-        events::{Deliver, SendBytes},
+        events::Deliver,
     },
     types::ReplicaIndex,
 };
+use libbft_network::peer::PeerNetwork;
 use opentelemetry::{KeyValue, trace::TracerProvider as _};
 use opentelemetry_sdk::{Resource, propagation::TraceContextPropagator, trace::SdkTracerProvider};
 use opentelemetry_semantic_conventions::{
     SCHEMA_URL,
     attribute::{DEPLOYMENT_ENVIRONMENT_NAME, SERVICE_VERSION},
 };
-use tokio::{signal::ctrl_c, sync::mpsc::channel, task::JoinSet, time::sleep};
+use tokio::{net::TcpListener, signal::ctrl_c, sync::mpsc::channel, task::JoinSet};
 use tokio_util::sync::CancellationToken;
-use tracing::{Level, info_span};
+use tracing::{Level, info, info_span};
 use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{Layer, filter::Targets, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -30,136 +31,116 @@ fn params() -> PbftParams {
 }
 
 fn replica_addr(index: ReplicaIndex) -> SocketAddr {
-    ([10, 0, 0, index + 1], 3000).into()
+    ([127, 0, 0, 1], 4000 + index as u16).into()
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let index = std::env::args()
+        .find_map(|arg| arg.strip_prefix("index=")?.parse().ok())
+        .context("invalid replica index")?;
+
     let tracer_provider = init_tracing_subscriber();
     metrics_exporter_prometheus::PrometheusBuilder::new()
         .with_recommended_naming(true)
+        .with_http_listener(([0, 0, 0, 0], 9000 + index as u16))
         .install()?;
 
-    let (fabric_bytes_tx, mut fabric_bytes_rx) = channel(1000);
     let mut request_tx = None;
-    let mut deliver_rx_vec = Vec::new();
-    let mut snapshot_tx_vec = Vec::new();
-    let mut node_bytes_tx_map = HashMap::new();
+    let mut snapshot_tx = None;
+    let (deliver_tx, mut deliver_rx) = channel(1000);
 
     let token = CancellationToken::new();
     let mut join_set = JoinSet::new();
-    for i in 0..params().num_replicas {
-        let config = PbftCoreConfig {
-            params: params(),
-            replica_index: i as ReplicaIndex,
-            window_size: 200, // we ingest checkpoint per 100 delivery (see below)
-            max_block_size: 1,
-        };
-
-        let mut protocol = PbftProtocol::new(config);
-        let mut ingress = PbftIngressWorker::new(DummyCrypto, params());
-        let mut egress = PbftEgressWorker::new(
-            DummyCrypto,
-            params(),
-            (0..params().num_replicas)
-                .filter(|&index| index != i)
-                .map(|index| (index as _, replica_addr(index as _)))
-                .collect(),
-        );
-
-        let emit_request = if i == 0 { &mut request_tx } else { &mut None };
-        let mut snapshot_tx = None;
-        protocol.register(emit_request, &mut ingress, &mut egress, &mut snapshot_tx);
-        snapshot_tx_vec.push(snapshot_tx.unwrap());
-        let mut node_bytes_tx = None;
-        ingress.register(&mut node_bytes_tx);
-        let node_bytes_tx = node_bytes_tx.unwrap();
-        node_bytes_tx_map.insert(replica_addr(i as _), node_bytes_tx);
-        egress.register(&mut protocol);
-
-        let (deliver_tx, deliver_rx) = channel(1000);
-        Emit::<Deliver>::set_tx(&mut protocol, deliver_tx);
-        deliver_rx_vec.push(deliver_rx);
-        Emit::<SendBytes>::set_tx(&mut egress, fabric_bytes_tx.clone());
-
-        join_set.spawn({
-            let token = token.clone();
-            async move { protocol.run(&token).await }
-        });
-        join_set.spawn({
-            let token = token.clone();
-            async move { egress.run(&token).await }
-        });
-        join_set.spawn({
-            let token = token.clone();
-            async move { ingress.run(&token).await }
-        });
-    }
-
-    let fabric = async move {
-        while let Some(((receiver_addr, bytes), span)) = fabric_bytes_rx.recv().await {
-            node_bytes_tx_map[&receiver_addr]
-                .send((bytes.into(), span))
-                .await?;
-        }
-        anyhow::Ok(())
+    let config = PbftCoreConfig {
+        params: params(),
+        replica_index: index,
+        window_size: 200, // we ingest checkpoint per 100 delivery (see below)
+        max_block_size: 1,
     };
+
+    let mut protocol = PbftProtocol::new(config);
+    let mut ingress = PbftIngressWorker::new(DummyCrypto, params());
+    let mut egress = PbftEgressWorker::new(
+        DummyCrypto,
+        params(),
+        (0..params().num_replicas)
+            .filter(|&i| i != index as _)
+            .map(|index| (index as _, replica_addr(index as _)))
+            .collect(),
+    );
+    let listener = TcpListener::bind(replica_addr(index))
+        .await
+        .with_context(|| format!("Failed to bind to {}", replica_addr(index)))?;
+    info!("Node {index} listening on {}", replica_addr(index));
+    let mut network = PeerNetwork::new(listener);
+
+    let emit_request = if index == 0 {
+        &mut request_tx
+    } else {
+        &mut None
+    };
+    protocol.register(emit_request, &mut ingress, &mut egress, &mut snapshot_tx);
+    Emit::<Deliver>::set_tx(&mut protocol, deliver_tx);
+    ingress.register(&mut network);
+    egress.register(&mut protocol);
+    network.register(&mut egress);
+
     join_set.spawn({
         let token = token.clone();
-        async move {
-            if let Some(Err(err)) = token.run_until_cancelled(fabric).await {
-                tracing::error!("Fabric error: {err:#}");
-            }
-        }
+        async move { protocol.run(&token).await }
+    });
+    join_set.spawn({
+        let token = token.clone();
+        async move { egress.run(&token).await }
+    });
+    join_set.spawn({
+        let token = token.clone();
+        async move { ingress.run(&token).await }
+    });
+    join_set.spawn({
+        let token = token.clone();
+        async move { network.run(&token).await.expect("network should not fail") }
     });
 
-    let request_tx = request_tx.unwrap();
+    let snapshot_tx = snapshot_tx.unwrap();
     let workload = async move {
         let mut count = 0;
         let rounds = async {
             loop {
                 let span = info_span!("Workload", round = count);
-                request_tx
-                    .send((PbftRequest(b"hello".into()), span))
-                    .await
-                    .context("request")?;
-                for (i, deliver_rx) in deliver_rx_vec.iter_mut().enumerate() {
-                    deliver_rx
-                        .recv()
+                if let Some(request_tx) = &request_tx {
+                    request_tx
+                        .send((PbftRequest(b"hello".into()), span))
                         .await
-                        .with_context(|| format!("Node {i} deliver round {count}"))?;
-                    tracing::debug!("Node {i} delivered");
+                        .context("request")?;
                 }
+                deliver_rx
+                    .recv()
+                    .await
+                    .with_context(|| format!("Node {index} deliver round {count}"))?;
                 count += 1;
                 if count % 100 == 0 {
-                    for snapshot_tx in &snapshot_tx_vec {
-                        snapshot_tx
-                            .send((
-                                (count, Digest([0u8; 32].into())),
-                                info_span!("TriggerSnapshot", round = count),
-                            ))
-                            .await
-                            .context("Failed to trigger snapshot")?;
-                    }
+                    snapshot_tx
+                        .send((
+                            (count, Digest([0u8; 32].into())),
+                            info_span!("TriggerSnapshot", round = count),
+                        ))
+                        .await
+                        .context("Failed to trigger snapshot")?;
                 }
             }
             #[allow(unreachable_code)]
             anyhow::Ok(())
         };
-        let interrupt = async {
-            if var("CI") == Ok("true".into()) {
-                sleep(Duration::from_secs(3)).await;
-            } else {
-                ctrl_c().await.context("Failed to listen for Ctrl+C")?;
-                eprintln!();
-            }
-            anyhow::Ok(())
-        };
         tokio::select! {
             res = rounds => res?,
-            res = interrupt => res?,
+            res = ctrl_c() => {
+                res.context("Failed to listen for Ctrl+C")?;
+                eprintln!();
+            }
         }
-        tracing::info!("Finished {count} rounds");
+        info!("Finished {count} rounds");
         anyhow::Ok(())
     };
     join_set.spawn(async move {

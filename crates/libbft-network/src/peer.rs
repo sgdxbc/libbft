@@ -55,7 +55,15 @@ impl PeerNetwork {
     pub fn register(&self, emit_send_bytes: &mut impl Emit<events::SendBytes>) {
         emit_send_bytes.set_tx(self.send_bytes_tx.clone());
     }
+}
 
+impl Emit<events::HandleBytes> for PeerNetwork {
+    fn tx_slot(&mut self) -> &mut Option<EventSender<events::HandleBytes>> {
+        &mut self.handle_bytes_tx
+    }
+}
+
+impl PeerNetwork {
     // currently exposing non-blocking connect, which will automatically connect to multiple peers
     // concurrently
     // can switch to blocking async method if causality or timely error reporting is desired
