@@ -18,7 +18,10 @@ scrape_configs:
     static_configs:
       - targets: ['localhost:9090']
 
-  - job_name: 'local-pbft'
+  - job_name: 'pbft-node'
     scrape_interval: 1s
     static_configs:
       - targets: ['host.docker.internal:9000']
+      - targets: ['host.docker.internal:9001']
+      - targets: ['host.docker.internal:9002']
+      - targets: ['host.docker.internal:9003']

@@ -219,6 +219,7 @@ impl ConnectionWorker {
             while let Some((bytes, _span)) = self.send_bytes_rx.recv().await {
                 write.send(bytes).await?
             }
+            write.close().await?;
             anyhow::Ok(())
         };
         try_join!(ingress, egress)?;
