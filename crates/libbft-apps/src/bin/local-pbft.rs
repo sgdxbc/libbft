@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
             max_block_size: 1,
         };
 
-        let mut protocol = PbftProtocol::<DummyCrypto>::new(config);
+        let mut protocol = PbftProtocol::new(config);
         let mut ingress = PbftIngressWorker::new(DummyCrypto, params());
         let mut egress = PbftEgressWorker::new(
             DummyCrypto,

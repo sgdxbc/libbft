@@ -1,7 +1,10 @@
 use anyhow::Context;
 use borsh::{BorshDeserialize, BorshSerialize};
 
-use crate::{crypto::CryptoKit, pbft::core::Checkpoint};
+use crate::{
+    crypto::{CryptoKit, SigBytes},
+    pbft::core::Checkpoint,
+};
 
 use super::core::{Commit, PbftMessage, PbftParams, PrePrepare, Prepare};
 
@@ -28,7 +31,7 @@ impl<C: PbftCryptoContext> PbftWorker<C> {
         Self { context, params }
     }
 
-    pub fn egress(&self, message: &mut PbftMessage) -> (Vec<u8>, C::Sig) {
+    pub fn egress(&self, message: &mut PbftMessage) -> (Vec<u8>, SigBytes) {
         let mut piggyback_bytes = vec![];
         let verifiable_data = match message {
             PbftMessage::PrePrepare(pre_prepare, requests) => {
@@ -53,7 +56,7 @@ impl<C: PbftCryptoContext> PbftWorker<C> {
         (bytes, sig)
     }
 
-    pub fn ingress(&self, bytes: &[u8], sig: &C::Sig) -> anyhow::Result<PbftMessage> {
+    pub fn ingress(&self, bytes: &[u8], sig: &SigBytes) -> anyhow::Result<PbftMessage> {
         anyhow::ensure!(
             bytes.len() >= 4,
             "Invalid message: too short to contain length prefix"
