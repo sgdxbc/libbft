@@ -109,10 +109,6 @@ pub struct PbftCore<C> {
     view_num: ViewNum,
     seq_num: SeqNum,
     pending_requests: Vec<PbftRequest>,
-    // invariant: for seq_num <= last_stable, log[seq_num] not exists
-    // invariant: for seq_num in (last_stable, executed_seq_num], log[seq_num] exists and is
-    // committed
-    // invariant: log[executed_seq_num] not exists or is not committed
     log: BTreeMap<SeqNum, LogSlot>,
     executed_seq_num: SeqNum,
     // invariant: every proof except the first one (i.e. with smallest seq num) is not stable
