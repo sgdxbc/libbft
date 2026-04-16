@@ -1,5 +1,6 @@
 use std::{collections::HashMap, net::SocketAddr};
 
+use bytes::Buf;
 use futures_util::{SinkExt, StreamExt, future::OptionFuture};
 use libbft::event::{Emit, EventReceiver, EventSender};
 use tokio::{
@@ -13,7 +14,8 @@ use tokio_util::{
     codec::{Decoder, LengthDelimitedCodec},
     sync::CancellationToken,
 };
-use tracing::warn;
+use tracing::{info_span, warn};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 mod events {
     use bytes::Bytes;
@@ -201,22 +203,45 @@ impl ConnectionWorker {
             Remote::Connected(stream, _) => stream,
             Remote::Connect(remote_addr) => TcpStream::connect(remote_addr).await?,
         };
+        stream.set_nodelay(true)?; // spellchecker:disable-line
+
         let handle_bytes_tx = self.handle_bytes_tx.unwrap();
         drop(self.send_bytes_tx);
         let (mut write, mut read) = LengthDelimitedCodec::new().framed(stream).split();
         let ingress = async {
-            while let Some(bytes) = read.next().await.transpose()? {
-                if let Err(err) = handle_bytes_tx
-                    .send((bytes.to_vec(), tracing::Span::none()))
-                    .await
-                {
+            while let Some(mut bytes) = read.next().await.transpose()? {
+                let carrier_len = bytes.try_get_u32_le()? as usize;
+                anyhow::ensure!(bytes.remaining() >= carrier_len, "Invalid carrier length");
+                let carrier = borsh::from_slice::<HashMap<String, String>>(
+                    &bytes.copy_to_bytes(carrier_len),
+                )?;
+                let context = opentelemetry::global::get_text_map_propagator(|propagator| {
+                    propagator.extract(&carrier)
+                });
+                let span = info_span!("PeerNetwork receive bytes");
+                span.set_parent(context)?;
+
+                if let Err(err) = handle_bytes_tx.send((bytes.into(), span)).await {
                     warn!("Failed to send received bytes to handler: {err:#}");
                 }
             }
             anyhow::Ok(())
         };
         let egress = async {
-            while let Some((bytes, _span)) = self.send_bytes_rx.recv().await {
+            while let Some((bytes, span)) = self.send_bytes_rx.recv().await {
+                let context = span.context();
+                let mut carrier = HashMap::new();
+                opentelemetry::global::get_text_map_propagator(|propagator| {
+                    propagator.inject_context(&context, &mut carrier)
+                });
+                let carrier_bytes = borsh::to_vec(&carrier).unwrap();
+                let bytes = [
+                    &(carrier_bytes.len() as u32).to_le_bytes()[..],
+                    &carrier_bytes,
+                    &bytes,
+                ]
+                .concat()
+                .into();
                 write.send(bytes).await?
             }
             write.close().await?;

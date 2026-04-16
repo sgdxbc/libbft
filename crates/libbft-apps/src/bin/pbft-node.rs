@@ -16,6 +16,7 @@ use opentelemetry_sdk::{Resource, propagation::TraceContextPropagator, trace::Sd
 use opentelemetry_semantic_conventions::{
     SCHEMA_URL,
     attribute::{DEPLOYMENT_ENVIRONMENT_NAME, SERVICE_VERSION},
+    resource::SERVICE_INSTANCE_ID,
 };
 use tokio::{net::TcpListener, signal::ctrl_c, sync::mpsc::channel, task::JoinSet};
 use tokio_util::sync::CancellationToken;
@@ -166,7 +167,7 @@ fn resource() -> Resource {
         .with_schema_url(
             [
                 KeyValue::new(SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
-                // KeyValue::new(SERVICE_INSTANCE_ID, uuid::Uuid::new_v4().to_string()),
+                KeyValue::new(SERVICE_INSTANCE_ID, uuid::Uuid::new_v4().to_string()),
                 KeyValue::new(DEPLOYMENT_ENVIRONMENT_NAME, "develop"),
             ],
             SCHEMA_URL,

@@ -643,6 +643,7 @@ name = "libbft-network"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "borsh",
  "bytes",
  "futures-util",
  "libbft",
