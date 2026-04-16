@@ -1,5 +1,7 @@
 use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
+use anyhow::Context as _;
+use bytes::{Buf, Bytes};
 use tokio::{sync::mpsc::channel, time::interval};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, Span, instrument, warn};
@@ -7,7 +9,6 @@ use tracing::{Instrument, Span, instrument, warn};
 use crate::{
     crypto::SigBytes,
     event::{Emit, EventReceiver, EventSender},
-    pbft::events::Recipient,
 };
 
 mod core;
@@ -25,24 +26,25 @@ pub mod events {
         type Type = core::PbftRequest;
     }
 
-    pub struct SignedMessage;
-    impl Event for SignedMessage {
-        type Type = (core::PbftMessage, SigBytes);
+    pub enum HandleMessageValue {
+        Ingress(core::PbftMessage, SigBytes),
+        Loopback(core::PbftMessage, SigBytes),
+        Sync(core::PbftSyncMessage),
     }
 
-    pub struct LoopbackMessage;
-    impl Event for LoopbackMessage {
-        type Type = (core::PbftMessage, SigBytes);
+    pub struct HandleMessage;
+    impl Event for HandleMessage {
+        type Type = HandleMessageValue;
     }
 
-    pub enum Recipient {
-        To(core::ReplicaIndex),
-        Broadcast,
+    pub enum SendMessageValue {
+        Broadcast(core::PbftMessage),
+        Sync(core::ReplicaIndex, core::PbftSyncMessage),
     }
 
     pub struct SendMessage;
     impl Event for SendMessage {
-        type Type = (Recipient, core::PbftMessage);
+        type Type = SendMessageValue;
     }
 
     pub struct Deliver;
@@ -65,10 +67,8 @@ pub struct PbftProtocol {
 
     request_tx: EventSender<events::HandleRequest>,
     request_rx: EventReceiver<events::HandleRequest>,
-    signed_message_tx: EventSender<events::SignedMessage>,
-    signed_message_rx: EventReceiver<events::SignedMessage>,
-    loopback_tx: EventSender<events::LoopbackMessage>,
-    loopback_rx: EventReceiver<events::LoopbackMessage>,
+    message_tx: EventSender<events::HandleMessage>,
+    message_rx: EventReceiver<events::HandleMessage>,
     snapshot_tx: EventSender<events::Snapshot>,
     snapshot_rx: EventReceiver<events::Snapshot>,
 }
@@ -81,9 +81,8 @@ pub struct PbftCoreContextState {
 impl PbftProtocol {
     pub fn new(config: core::PbftCoreConfig) -> Self {
         let (request_tx, request_rx) = channel(1000);
-        let (signed_message_tx, signed_message_rx) = channel(1000);
-        let (loopback_tx, loopback_rx) = channel(1000);
-        let (checkpoint_tx, checkpoint_rx) = channel(1000);
+        let (message_tx, message_rx) = channel(1000);
+        let (snapshot_tx, snapshot_rx) = channel(1000);
         let core_context = PbftCoreContextState {
             message_tx: None,
             deliver_tx: None,
@@ -93,25 +92,23 @@ impl PbftProtocol {
             core,
             request_tx,
             request_rx,
-            signed_message_tx,
-            signed_message_rx,
-            loopback_tx,
-            loopback_rx,
-            snapshot_tx: checkpoint_tx,
-            snapshot_rx: checkpoint_rx,
+            message_tx,
+            message_rx,
+            snapshot_tx,
+            snapshot_rx,
         }
     }
 
     pub fn register(
         &self,
         emit_request: &mut impl Emit<events::HandleRequest>,
-        emit_signed_message: &mut impl Emit<events::SignedMessage>,
-        emit_loopback_message: &mut impl Emit<events::LoopbackMessage>,
+        emit_signed_message: &mut impl Emit<events::HandleMessage>,
+        emit_loopback_message: &mut impl Emit<events::HandleMessage>,
         emit_snapshot: &mut impl Emit<events::Snapshot>,
     ) {
         emit_request.set_tx(self.request_tx.clone());
-        emit_signed_message.set_tx(self.signed_message_tx.clone());
-        emit_loopback_message.set_tx(self.loopback_tx.clone());
+        emit_signed_message.set_tx(self.message_tx.clone());
+        emit_loopback_message.set_tx(self.message_tx.clone());
         emit_snapshot.set_tx(self.snapshot_tx.clone());
     }
 }
@@ -140,11 +137,18 @@ impl PbftProtocol {
                 Some((request, span)) = self.request_rx.recv() => {
                     self.core.on_request(request).instrument(span).await;
                 }
-                Some(((message, sig), span)) = self.signed_message_rx.recv() => {
-                    self.core.on_message(message, sig).instrument(span).await;
-                }
-                Some(((message, sig), span)) = self.loopback_rx.recv() => {
-                    self.core.on_loopback_message(message, sig).instrument(span).await;
+                Some((value, span)) = self.message_rx.recv() => {
+                    match value {
+                        events::HandleMessageValue::Ingress(message, sig) => {
+                            self.core.on_message(message, sig).instrument(span).await
+                        }
+                        events::HandleMessageValue::Loopback(message, sig) => {
+                            self.core.on_loopback_message(message, sig).instrument(span).await
+                        }
+                        events::HandleMessageValue::Sync(sync_message) => {
+                            self.core.on_sync_message(sync_message).instrument(span).await
+                        }
+                    }
                 }
                 Some(((seq_num, state_digest), span)) = self.snapshot_rx.recv() => {
                     self.core.on_snapshot(seq_num, state_digest).instrument(span).await;
@@ -158,13 +162,13 @@ impl PbftProtocol {
 }
 
 impl core::PbftCoreContext for PbftCoreContextState {
-    async fn send_message(&mut self, to: core::ReplicaIndex, message: core::PbftMessage) {
+    async fn send_sync_message(&mut self, to: core::ReplicaIndex, message: core::PbftSyncMessage) {
         if let Err(err) = self
             .message_tx
             .as_ref()
             .unwrap()
             // ideally we should use the "lifecycle" span here to create sibling spans for pipeline
-            .send(((Recipient::To(to), message), Span::current()))
+            .send((events::SendMessageValue::Sync(to, message), Span::current()))
             .await
         {
             warn!("Failed to send message to crypto verify worker: {err:#}");
@@ -176,7 +180,10 @@ impl core::PbftCoreContext for PbftCoreContextState {
             .message_tx
             .as_ref()
             .unwrap()
-            .send(((Recipient::Broadcast, message), Span::current()))
+            .send((
+                events::SendMessageValue::Broadcast(message),
+                Span::current(),
+            ))
             .await
         {
             warn!("Failed to send message to crypto verify worker: {err:#}");
@@ -206,7 +213,7 @@ pub struct PbftIngressWorker<C: workers::PbftCryptoContext> {
 
     bytes_tx: EventSender<events::HandleBytes>,
     bytes_rx: EventReceiver<events::HandleBytes>,
-    signed_message_tx: Option<EventSender<events::SignedMessage>>, // node
+    signed_message_tx: Option<EventSender<events::HandleMessage>>, // node
 }
 
 impl<C: workers::PbftCryptoContext> PbftIngressWorker<C> {
@@ -225,8 +232,8 @@ impl<C: workers::PbftCryptoContext> PbftIngressWorker<C> {
     }
 }
 
-impl<C: workers::PbftCryptoContext> Emit<events::SignedMessage> for PbftIngressWorker<C> {
-    fn tx_slot(&mut self) -> &mut Option<EventSender<events::SignedMessage>> {
+impl<C: workers::PbftCryptoContext> Emit<events::HandleMessage> for PbftIngressWorker<C> {
+    fn tx_slot(&mut self) -> &mut Option<EventSender<events::HandleMessage>> {
         &mut self.signed_message_tx
     }
 }
@@ -236,12 +243,12 @@ impl<C: workers::PbftCryptoContext> PbftIngressWorker<C> {
         while let Some(Some((bytes, span))) = token.run_until_cancelled(self.bytes_rx.recv()).await
         {
             match span.in_scope(|| self.decode(&bytes)) {
-                Ok((message, sig)) => {
+                Ok(value) => {
                     if let Err(err) = self
                         .signed_message_tx
                         .as_ref()
                         .unwrap()
-                        .send(((message, sig), span))
+                        .send((value, span))
                         .await
                     {
                         warn!("Failed to send verified message to node: {err:#}");
@@ -253,13 +260,25 @@ impl<C: workers::PbftCryptoContext> PbftIngressWorker<C> {
     }
 
     #[instrument(skip_all)]
-    fn decode(&self, bytes: &[u8]) -> anyhow::Result<(core::PbftMessage, SigBytes)> {
-        let Some((sig_bytes, data_bytes)) = bytes.split_at_checked(C::SIG_BYTES_LEN) else {
-            anyhow::bail!("Received bytes too short to contain signature");
+    fn decode(&self, mut bytes: &[u8]) -> anyhow::Result<events::HandleMessageValue> {
+        let value = match bytes.try_get_u8()? {
+            0x0 => {
+                let Some((sig_bytes, data_bytes)) = bytes.split_at_checked(C::SIG_BYTES_LEN) else {
+                    anyhow::bail!("Received bytes too short to contain signature");
+                };
+                let sig = SigBytes(sig_bytes.into());
+                let message = self.state.ingress(data_bytes, &sig)?;
+                events::HandleMessageValue::Ingress(message, sig)
+            }
+            0x1 => {
+                let data_bytes = bytes;
+                let message =
+                    borsh::from_slice(data_bytes).context("Failed to deserialize sync message")?;
+                events::HandleMessageValue::Sync(message)
+            }
+            tag => anyhow::bail!("Invalid message: unknown tag {tag:#x}"),
         };
-        let sig = SigBytes(sig_bytes.into());
-        let message = self.state.ingress(data_bytes, &sig)?;
-        Ok((message, sig))
+        Ok(value)
     }
 }
 
@@ -270,7 +289,7 @@ pub struct PbftEgressWorker<C: workers::PbftCryptoContext> {
     message_tx: EventSender<events::SendMessage>,
     message_rx: EventReceiver<events::SendMessage>,
     bytes_tx: Option<EventSender<events::SendBytes>>, // network
-    loopback_tx: Option<EventSender<events::LoopbackMessage>>, // node
+    loopback_tx: Option<EventSender<events::HandleMessage>>, // node
 }
 
 impl<C: workers::PbftCryptoContext> PbftEgressWorker<C> {
@@ -301,8 +320,8 @@ impl<C: workers::PbftCryptoContext> Emit<events::SendBytes> for PbftEgressWorker
     }
 }
 
-impl<C: workers::PbftCryptoContext> Emit<events::LoopbackMessage> for PbftEgressWorker<C> {
-    fn tx_slot(&mut self) -> &mut Option<EventSender<events::LoopbackMessage>> {
+impl<C: workers::PbftCryptoContext> Emit<events::HandleMessage> for PbftEgressWorker<C> {
+    fn tx_slot(&mut self) -> &mut Option<EventSender<events::HandleMessage>> {
         &mut self.loopback_tx
     }
 }
@@ -311,21 +330,17 @@ impl<C: workers::PbftCryptoContext> PbftEgressWorker<C> {
     pub async fn run(&mut self, token: &CancellationToken) {
         let bytes_tx = self.bytes_tx.as_ref().unwrap();
         let loopback_tx = self.loopback_tx.as_ref().unwrap();
-        while let Some(Some(((recipient, mut message), span))) =
+        while let Some(Some((message, span))) =
             token.run_until_cancelled(self.message_rx.recv()).await
         {
-            let (data_bytes, SigBytes(sig_bytes)) = self.state.egress(&mut message);
-            let bytes = [&*sig_bytes, &data_bytes].concat().into();
-            match recipient {
-                Recipient::To(to) => {
-                    if let Err(err) = bytes_tx
-                        .send(((self.replica_addrs[&to], bytes), span))
-                        .await
-                    {
-                        warn!("Failed to send message to node {to}: {err:#}");
-                    }
-                }
-                Recipient::Broadcast => {
+            match message {
+                events::SendMessageValue::Broadcast(mut message) => {
+                    let (data_bytes, SigBytes(sig_bytes)) = self.state.egress(&mut message);
+                    let mut buf = vec![0x0];
+                    buf.extend_from_slice(&sig_bytes);
+                    buf.extend_from_slice(&data_bytes);
+                    let bytes = Bytes::from(buf);
+
                     // why there's `Receiver::recv_many` but no `Sender::send_many`?
                     for (&index, &addr) in &self.replica_addrs {
                         if let Err(err) = bytes_tx.send(((addr, bytes.clone()), span.clone())).await
@@ -334,10 +349,24 @@ impl<C: workers::PbftCryptoContext> PbftEgressWorker<C> {
                         }
                     }
                     if let Err(err) = loopback_tx
-                        .send(((message, SigBytes(sig_bytes)), span))
+                        .send((
+                            events::HandleMessageValue::Loopback(message, SigBytes(sig_bytes)),
+                            span,
+                        ))
                         .await
                     {
                         warn!("Failed to loopback signed message: {err:#}");
+                    }
+                }
+                events::SendMessageValue::Sync(to, message) => {
+                    let data_bytes = borsh::to_vec(&message).unwrap();
+                    let mut buf = vec![0x1];
+                    buf.extend_from_slice(&data_bytes);
+                    if let Err(err) = bytes_tx
+                        .send(((self.replica_addrs[&to], buf.into()), span))
+                        .await
+                    {
+                        warn!("Failed to send sync message to node {to}: {err:#}");
                     }
                 }
             }

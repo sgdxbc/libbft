@@ -1,5 +1,6 @@
 use anyhow::Context;
 use borsh::{BorshDeserialize, BorshSerialize};
+use bytes::Buf;
 
 use crate::{
     crypto::{CryptoKit, SigBytes},
@@ -56,13 +57,9 @@ impl<C: PbftCryptoContext> PbftWorker<C> {
         (bytes, sig)
     }
 
-    pub fn ingress(&self, bytes: &[u8], sig: &SigBytes) -> anyhow::Result<PbftMessage> {
-        anyhow::ensure!(
-            bytes.len() >= 4,
-            "Invalid message: too short to contain length prefix"
-        );
-        let data_len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
-        let Some((data_bytes, piggyback_bytes)) = bytes[4..].split_at_checked(data_len) else {
+    pub fn ingress(&self, mut bytes: &[u8], sig: &SigBytes) -> anyhow::Result<PbftMessage> {
+        let data_len = bytes.try_get_u32_le()? as usize;
+        let Some((data_bytes, piggyback_bytes)) = bytes.split_at_checked(data_len) else {
             anyhow::bail!("Invalid message: data length prefix exceeds actual length");
         };
         let data =

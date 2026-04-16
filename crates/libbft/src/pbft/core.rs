@@ -26,19 +26,25 @@ pub struct PbftCoreConfig {
 }
 
 pub trait PbftCoreContext {
-    // sign `message` and send message along with the signature to `to`
-    // "message" is short for "peer message" in this codebase
-    fn send_message(&mut self, to: ReplicaIndex, message: PbftMessage) -> impl Future<Output = ()>;
-
-    // sign `message` and broadcast message along with the signature, and call `on_loopback_message`
-    // with the message and signature
-    fn broadcast_message(&mut self, message: PbftMessage) -> impl Future<Output = ()>;
-
     fn deliver(
         &mut self,
         seq_num: SeqNum,
         requests: Vec<PbftRequest>,
         view_num: ViewNum,
+    ) -> impl Future<Output = ()>;
+
+    // "message" is short for "peer message" in this codebase
+
+    // sign `message` and broadcast message along with the signature, and call `on_loopback_message`
+    // with the message and signature
+    fn broadcast_message(&mut self, message: PbftMessage) -> impl Future<Output = ()>;
+
+    // send message in plain to `to`. sync messages are self-certified and do not require to
+    // authenticate the sender
+    fn send_sync_message(
+        &mut self,
+        to: ReplicaIndex,
+        message: PbftSyncMessage,
     ) -> impl Future<Output = ()>;
 }
 
@@ -52,6 +58,9 @@ pub enum PbftMessage {
     Commit(Commit),
     Checkpoint(Checkpoint),
 }
+
+#[derive(Debug, BorshSerialize, BorshDeserialize)]
+pub struct PbftSyncMessage(pub PbftRequest);
 
 #[derive(Debug, BorshSerialize, BorshDeserialize, Clone)]
 pub struct PrePrepare {
@@ -89,7 +98,7 @@ impl PbftMessage {
             PbftMessage::PrePrepare(pre_prepare, _) => Some(pre_prepare.view_num),
             PbftMessage::Prepare(prepare) => Some(prepare.view_num),
             PbftMessage::Commit(commit) => Some(commit.view_num),
-            PbftMessage::Checkpoint(_) => None,
+            _ => None,
         }
     }
 
@@ -202,6 +211,12 @@ impl<C: PbftCoreContext> PbftCore<C> {
     #[instrument(skip(self), fields(replica_index = self.config.replica_index))]
     pub async fn on_request(&mut self, request: PbftRequest) {
         if !self.config.is_view_leader(self.view_num) {
+            self.context
+                .send_sync_message(
+                    self.config.params.view_leader(self.view_num),
+                    PbftSyncMessage(request),
+                )
+                .await;
             // TODO set timer
             return;
         }
@@ -301,6 +316,10 @@ impl<C: PbftCoreContext> PbftCore<C> {
             }
             PbftMessage::Checkpoint(checkpoint) => self.handle_checkpoint(checkpoint, sig).await,
         }
+    }
+
+    pub async fn on_sync_message(&mut self, PbftSyncMessage(request): PbftSyncMessage) {
+        self.on_request(request).await;
     }
 
     #[instrument(skip(self), fields(replica_index = self.config.replica_index))]
