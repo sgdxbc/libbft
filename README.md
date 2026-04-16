@@ -20,8 +20,8 @@ No more meditation for reasoning about *where it stuck* or *why it runs so slow*
 ![Prometheus latency screenshot](./docs/screenshots/prometheus-latency.png)
 </details>
 
-**Pure state machine protocols.**
-Core protocol logics are completely separated from surrounding I/O framework and are suitable for property-based testing.
+**Streamlined protocol implementations in pure state machines.**
+Core protocol logics are completely decoupled with peripheral I/O framework and are suitable for property-based testing.
 
 **Highly incremental development workflow.**
 Start from (property-based) test cases.
@@ -30,6 +30,9 @@ Then multi-process cluster with localhost network.
 Then bring your own cluster or AWS credential.
 This codebase enables addressing issues with minimum infrastructures that can reproduce them before moving on to more involved setups.
 
+**Performant and simple protocol code written in Rust.**
+You probably cannot get better performance from any other implementation without longer code.
+
 ## Quick Start
 
-Coming soon.
+> Coming soon.
