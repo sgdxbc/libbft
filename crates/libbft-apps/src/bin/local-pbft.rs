@@ -10,17 +10,10 @@ use libbft::{
     },
     types::ReplicaIndex,
 };
-use opentelemetry::{KeyValue, trace::TracerProvider as _};
-use opentelemetry_sdk::{Resource, propagation::TraceContextPropagator, trace::SdkTracerProvider};
-use opentelemetry_semantic_conventions::{
-    SCHEMA_URL,
-    attribute::{DEPLOYMENT_ENVIRONMENT_NAME, SERVICE_VERSION},
-};
+use libbft_apps::{init_metrics_exporter, init_telemetry};
 use tokio::{signal::ctrl_c, sync::mpsc::channel, task::JoinSet, time::sleep};
 use tokio_util::sync::CancellationToken;
-use tracing::{Level, info_span};
-use tracing_opentelemetry::OpenTelemetryLayer;
-use tracing_subscriber::{Layer, filter::Targets, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing::info_span;
 
 fn params() -> PbftParams {
     PbftParams {
@@ -35,10 +28,8 @@ fn replica_addr(index: ReplicaIndex) -> SocketAddr {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let tracer_provider = init_tracing_subscriber();
-    metrics_exporter_prometheus::PrometheusBuilder::new()
-        .with_recommended_naming(true)
-        .install()?;
+    let telemetry = init_telemetry();
+    init_metrics_exporter(None)?;
 
     let (fabric_bytes_tx, mut fabric_bytes_rx) = channel(1000);
     let mut request_tx = None;
@@ -172,72 +163,8 @@ async fn main() -> anyhow::Result<()> {
         res.unwrap()
     }
 
-    if let Some(tracer_provider) = tracer_provider {
-        tracer_provider.shutdown()?;
+    if let Some(telemetry) = telemetry {
+        telemetry.shutdown()?;
     }
     Ok(())
-}
-
-// Create a Resource that captures information about the entity for which telemetry is recorded.
-fn resource() -> Resource {
-    Resource::builder()
-        .with_service_name(env!("CARGO_PKG_NAME"))
-        .with_schema_url(
-            [
-                KeyValue::new(SERVICE_VERSION, env!("CARGO_PKG_VERSION")),
-                // KeyValue::new(SERVICE_INSTANCE_ID, uuid::Uuid::new_v4().to_string()),
-                KeyValue::new(DEPLOYMENT_ENVIRONMENT_NAME, "develop"),
-            ],
-            SCHEMA_URL,
-        )
-        .build()
-}
-
-// Construct TracerProvider for OpenTelemetryLayer
-fn init_tracer_provider() -> SdkTracerProvider {
-    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
-    let exporter = opentelemetry_otlp::SpanExporter::builder()
-        .with_http()
-        .build()
-        .unwrap();
-
-    SdkTracerProvider::builder()
-        // Customize sampling strategy
-        // .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
-        //     0.01,
-        // ))))
-        // If export trace to AWS X-Ray, you can use XrayIdGenerator
-        // .with_id_generator(RandomIdGenerator::default())
-        .with_resource(resource())
-        .with_batch_exporter(exporter)
-        .build()
-}
-
-fn init_tracing_subscriber() -> Option<SdkTracerProvider> {
-    let targets = if let Ok(filter) = std::env::var("RUST_LOG") {
-        filter.parse().unwrap()
-    } else {
-        Targets::new()
-    };
-    let subscriber = tracing_subscriber::registry()
-        // The global level filter prevents the exporter network stack
-        // from reentering the globally installed OpenTelemetryLayer with
-        // its own spans while exporting, as the libraries should not use
-        // tracing levels below DEBUG. If the OpenTelemetry layer needs to
-        // trace spans and events with higher verbosity levels, consider using
-        // per-layer filtering to target the telemetry layer specifically,
-        // e.g. by target matching.
-        .with(tracing_subscriber::filter::LevelFilter::from_level(
-            Level::INFO,
-        ))
-        .with(tracing_subscriber::fmt::layer().with_filter(targets));
-    if std::env::var("OTEL_SDK_DISABLED") != Ok("true".into()) {
-        let tracer_provider = init_tracer_provider();
-        let tracer = tracer_provider.tracer(env!("CARGO_PKG_NAME"));
-        subscriber.with(OpenTelemetryLayer::new(tracer)).init();
-        Some(tracer_provider)
-    } else {
-        subscriber.init();
-        None
-    }
 }
