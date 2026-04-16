@@ -7,11 +7,11 @@ pub mod events {
 
     pub struct HandleBytes;
     impl Event for HandleBytes {
-        type Type = Vec<u8>;
+        type Value = Vec<u8>;
     }
 
     pub struct SendBytes;
     impl Event for SendBytes {
-        type Type = (SocketAddr, Bytes);
+        type Value = (SocketAddr, Bytes);
     }
 }

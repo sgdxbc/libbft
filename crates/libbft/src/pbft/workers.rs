@@ -3,14 +3,14 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use bytes::Buf;
 
 use crate::{
-    crypto::{CryptoKit, SigBytes},
+    crypto::{CryptoScheme, SigBytes},
     pbft::core::Checkpoint,
 };
 
 use super::core::{Commit, PbftMessage, PbftParams, PrePrepare, Prepare};
 
-pub trait PbftCryptoContext: CryptoKit {}
-impl<C: CryptoKit> PbftCryptoContext for C {}
+pub trait PbftCryptoContext: CryptoScheme {}
+impl<C: CryptoScheme> PbftCryptoContext for C {}
 
 // both ingress and egress (happen to) need these same states
 pub struct PbftWorker<C> {

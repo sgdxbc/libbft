@@ -1,11 +1,11 @@
 use std::any::type_name;
 
 pub trait Event {
-    type Type;
+    type Value;
 }
 
-pub type EventSender<E> = tokio::sync::mpsc::Sender<(<E as Event>::Type, tracing::Span)>;
-pub type EventReceiver<E> = tokio::sync::mpsc::Receiver<(<E as Event>::Type, tracing::Span)>;
+pub type EventSender<E> = tokio::sync::mpsc::Sender<(<E as Event>::Value, tracing::Span)>;
+pub type EventReceiver<E> = tokio::sync::mpsc::Receiver<(<E as Event>::Value, tracing::Span)>;
 
 pub trait Emit<E: Event> {
     fn tx_slot(&mut self) -> &mut Option<EventSender<E>>;

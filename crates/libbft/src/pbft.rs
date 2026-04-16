@@ -23,7 +23,7 @@ pub mod events {
 
     pub struct HandleRequest;
     impl Event for HandleRequest {
-        type Type = core::PbftRequest;
+        type Value = core::PbftRequest;
     }
 
     pub enum HandleMessageValue {
@@ -33,7 +33,7 @@ pub mod events {
 
     pub struct HandleMessage;
     impl Event for HandleMessage {
-        type Type = HandleMessageValue;
+        type Value = HandleMessageValue;
     }
 
     pub enum SendMessageValue {
@@ -43,17 +43,17 @@ pub mod events {
 
     pub struct SendMessage;
     impl Event for SendMessage {
-        type Type = SendMessageValue;
+        type Value = SendMessageValue;
     }
 
     pub struct Deliver;
     impl Event for Deliver {
-        type Type = (core::SeqNum, Vec<core::PbftRequest>, core::ViewNum);
+        type Value = (core::SeqNum, Vec<core::PbftRequest>, core::ViewNum);
     }
 
     pub struct Snapshot;
     impl Event for Snapshot {
-        type Type = (core::SeqNum, core::Digest);
+        type Value = (core::SeqNum, core::Digest);
     }
 
     pub type HandleBytes = crate::network::events::HandleBytes;

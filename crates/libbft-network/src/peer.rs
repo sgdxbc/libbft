@@ -27,7 +27,7 @@ mod events {
 
     pub struct SendConnectionBytes;
     impl Event for SendConnectionBytes {
-        type Type = Bytes;
+        type Value = Bytes;
     }
 }
 
