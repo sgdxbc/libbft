@@ -27,8 +27,7 @@ pub mod events {
     }
 
     pub enum HandleMessageValue {
-        Ingress(core::PbftMessage, SigBytes),
-        Loopback(core::PbftMessage, SigBytes),
+        Signed(core::PbftMessage, SigBytes),
         Sync(core::PbftSyncMessage),
     }
 
@@ -139,11 +138,8 @@ impl PbftProtocol {
                 }
                 Some((value, span)) = self.message_rx.recv() => {
                     match value {
-                        events::HandleMessageValue::Ingress(message, sig) => {
+                        events::HandleMessageValue::Signed(message, sig) => {
                             self.core.on_message(message, sig).instrument(span).await
-                        }
-                        events::HandleMessageValue::Loopback(message, sig) => {
-                            self.core.on_loopback_message(message, sig).instrument(span).await
                         }
                         events::HandleMessageValue::Sync(sync_message) => {
                             self.core.on_sync_message(sync_message).instrument(span).await
@@ -268,7 +264,7 @@ impl<C: workers::PbftCryptoContext> PbftIngressWorker<C> {
                 };
                 let sig = SigBytes(sig_bytes.into());
                 let message = self.state.ingress(data_bytes, &sig)?;
-                events::HandleMessageValue::Ingress(message, sig)
+                events::HandleMessageValue::Signed(message, sig)
             }
             0x1 => {
                 let data_bytes = bytes;
@@ -350,7 +346,7 @@ impl<C: workers::PbftCryptoContext> PbftEgressWorker<C> {
                     }
                     if let Err(err) = loopback_tx
                         .send((
-                            events::HandleMessageValue::Loopback(message, SigBytes(sig_bytes)),
+                            events::HandleMessageValue::Signed(message, SigBytes(sig_bytes)),
                             span,
                         ))
                         .await

@@ -35,8 +35,9 @@ pub trait PbftCoreContext {
 
     // "message" is short for "peer message" in this codebase
 
-    // sign `message` and broadcast message along with the signature, and call `on_loopback_message`
-    // with the message and signature
+    // sign `message` and broadcast message along with the signature, and call `on_message` with the
+    // message and signature
+    // these loopback messages may bypass some checks, but the benefit of that is not significant
     fn broadcast_message(&mut self, message: PbftMessage) -> impl Future<Output = ()>;
 
     // send message in plain to `to`. sync messages are self-certified and do not require to
@@ -240,6 +241,9 @@ impl<C: PbftCoreContext> PbftCore<C> {
         if !matches!(message, PbftMessage::Checkpoint(_))
             && message.seq_num() <= self.executed_seq_num
         {
+            if matches!(message, PbftMessage::PrePrepare(_, _)) {
+                assert!(!self.config.is_view_leader(self.view_num));
+            }
             return;
         }
         match message {
@@ -248,72 +252,6 @@ impl<C: PbftCoreContext> PbftCore<C> {
             }
             PbftMessage::Prepare(prepare) => self.handle_prepare(prepare, sig).await,
             PbftMessage::Commit(commit) => self.handle_commit(commit, sig).await,
-            PbftMessage::Checkpoint(checkpoint) => self.handle_checkpoint(checkpoint, sig).await,
-        }
-    }
-
-    // trusted loopback messages that may be processed differently or bypass some further validation
-    // compared to verified remote messages
-    #[instrument(skip(self), fields(replica_index = self.config.replica_index))]
-    pub async fn on_loopback_message(&mut self, message: PbftMessage, sig: SigBytes) {
-        if let Some(view_num) = message.view_num()
-            && view_num != self.view_num
-        {
-            return;
-        }
-        if !matches!(message, PbftMessage::Checkpoint(_))
-            && message.seq_num() <= self.executed_seq_num
-        {
-            assert!(!matches!(message, PbftMessage::PrePrepare(_, _)));
-            return;
-        }
-        match message {
-            PbftMessage::PrePrepare(pre_prepare, requests) => {
-                let seq_num = pre_prepare.seq_num;
-                let replaced = self.log.insert(
-                    seq_num,
-                    LogSlot {
-                        requests,
-                        signed_pre_prepare: (pre_prepare, sig),
-                        signed_prepares: Default::default(),
-                        signed_commits: Default::default(),
-                    },
-                );
-                assert!(replaced.is_none());
-                gauge!("pbft.log_size", "replica_index" => self.config.replica_index.to_string())
-                    .set(self.log.len() as f64);
-
-                if let Some(prepares) = self.reorder_prepares.remove(&seq_num) {
-                    for (prepare, sig) in prepares {
-                        self.handle_prepare(prepare, sig).await;
-                    }
-                }
-                if let Some(commits) = self.reorder_commits.remove(&seq_num) {
-                    for (commit, sig) in commits {
-                        self.handle_commit(commit, sig).await;
-                    }
-                }
-            }
-            PbftMessage::Prepare(prepare) => {
-                if self
-                    .config
-                    .params
-                    .slot_prepared(&self.log[&prepare.seq_num])
-                {
-                    return;
-                }
-                self.insert_prepare(prepare, sig).await
-            }
-            PbftMessage::Commit(commit) => {
-                if self
-                    .config
-                    .params
-                    .slot_committed(&self.log[&commit.seq_num])
-                {
-                    return;
-                }
-                self.insert_commit(commit, sig).await
-            }
             PbftMessage::Checkpoint(checkpoint) => self.handle_checkpoint(checkpoint, sig).await,
         }
     }
@@ -386,11 +324,13 @@ impl<C: PbftCoreContext> PbftCore<C> {
                 self.last_stable(),
                 self.config.window_size
             );
+            assert!(!self.config.is_view_leader(self.view_num));
             return;
         }
 
         let slot = self.log.entry(seq_num);
         if let Entry::Occupied(slot) = slot {
+            assert!(!self.config.is_view_leader(self.view_num));
             let (existing_pre_prepare, _) = &slot.get().signed_pre_prepare;
             assert_eq!(existing_pre_prepare.view_num, self.view_num);
             if existing_pre_prepare.digest != pre_prepare.digest {
@@ -405,16 +345,6 @@ impl<C: PbftCoreContext> PbftCore<C> {
             return;
         }
         let digest = pre_prepare.digest.clone();
-        let prepare = Prepare {
-            view_num: self.view_num,
-            seq_num,
-            digest,
-            replica_index: self.config.replica_index,
-        };
-        self.context
-            .broadcast_message(PbftMessage::Prepare(prepare))
-            .await;
-
         slot.insert_entry(LogSlot {
             requests,
             signed_pre_prepare: (pre_prepare, sig),
@@ -424,14 +354,21 @@ impl<C: PbftCoreContext> PbftCore<C> {
         gauge!("pbft_log_size", "replica_index" => self.config.replica_index.to_string())
             .set(self.log.len() as f64);
 
+        if !self.config.is_view_leader(self.view_num) {
+            let prepare = Prepare {
+                view_num: self.view_num,
+                seq_num,
+                digest,
+                replica_index: self.config.replica_index,
+            };
+            self.context
+                .broadcast_message(PbftMessage::Prepare(prepare))
+                .await;
+        }
+
         if let Some(prepares) = self.reorder_prepares.remove(&seq_num) {
             for (prepare, sig) in prepares {
                 self.handle_prepare(prepare, sig).await;
-            }
-        }
-        if let Some(commits) = self.reorder_commits.remove(&seq_num) {
-            for (commit, sig) in commits {
-                self.handle_commit(commit, sig).await;
             }
         }
     }
@@ -445,6 +382,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
             return;
         };
         if slot.signed_pre_prepare.0.digest != prepare.digest {
+            assert!(prepare.replica_index != self.config.replica_index);
             warn!(
                 self.config.replica_index,
                 "Conflicting Prepare for seq_num {} from replica {}: expected digest {:?}, got {:?}",
@@ -470,6 +408,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
         let seq_num = prepare.seq_num;
         let digest = prepare.digest.clone();
         let slot = self.log.get_mut(&seq_num).unwrap();
+        assert!(!self.config.params.slot_prepared(slot));
         slot.signed_prepares
             .insert(prepare.replica_index, (prepare, sig));
         if self.config.params.slot_prepared(slot) {
@@ -483,11 +422,20 @@ impl<C: PbftCoreContext> PbftCore<C> {
             self.context
                 .broadcast_message(PbftMessage::Commit(commit))
                 .await;
+            if let Some(commits) = self.reorder_commits.remove(&seq_num) {
+                for (commit, sig) in commits {
+                    self.handle_commit(commit, sig).await;
+                }
+            }
         }
     }
 
     async fn handle_commit(&mut self, commit: Commit, sig: SigBytes) {
-        let Some(slot) = &self.log.get(&commit.seq_num) else {
+        let Some(slot) = &self
+            .log
+            .get(&commit.seq_num)
+            .filter(|slot| self.config.params.slot_prepared(slot))
+        else {
             self.reorder_commits
                 .entry(commit.seq_num)
                 .or_default()
@@ -495,6 +443,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
             return;
         };
         if slot.signed_pre_prepare.0.digest != commit.digest {
+            assert!(commit.replica_index != self.config.replica_index);
             warn!(
                 self.config.replica_index,
                 "Conflicting Commit for seq_num {} from replica {}: expected digest {:?}, got {:?}",
@@ -514,6 +463,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
     async fn insert_commit(&mut self, commit: Commit, sig: SigBytes) {
         let seq_num = commit.seq_num;
         let slot = self.log.get_mut(&seq_num).unwrap();
+        assert!(!self.config.params.slot_committed(slot));
         slot.signed_commits
             .insert(commit.replica_index, (commit, sig));
         if self.config.params.slot_committed(slot) {
