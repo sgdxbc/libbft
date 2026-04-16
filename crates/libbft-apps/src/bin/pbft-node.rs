@@ -11,7 +11,10 @@ use libbft::{
     types::ReplicaIndex,
 };
 use libbft_network::peer::PeerNetwork;
-use opentelemetry::{KeyValue, trace::TracerProvider as _};
+use opentelemetry::{
+    KeyValue,
+    trace::{TracerProvider as _, noop::NoopTracer},
+};
 use opentelemetry_sdk::{Resource, propagation::TraceContextPropagator, trace::SdkTracerProvider};
 use opentelemetry_semantic_conventions::{
     SCHEMA_URL,
@@ -215,11 +218,16 @@ fn init_tracing_subscriber() -> Option<SdkTracerProvider> {
         .with(tracing_subscriber::fmt::layer().with_filter(targets));
     if std::env::var("OTEL_SDK_DISABLED") != Ok("true".into()) {
         let tracer_provider = init_tracer_provider();
-        let tracer = tracer_provider.tracer(env!("CARGO_PKG_NAME"));
-        subscriber.with(OpenTelemetryLayer::new(tracer)).init();
+        subscriber
+            .with(OpenTelemetryLayer::new(
+                tracer_provider.tracer(env!("CARGO_PKG_NAME")),
+            ))
+            .init();
         Some(tracer_provider)
     } else {
-        subscriber.init();
+        subscriber
+            .with(OpenTelemetryLayer::new(NoopTracer::new()))
+            .init();
         None
     }
 }

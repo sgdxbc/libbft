@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, btree_map::Entry};
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use metrics::{counter, gauge};
+use metrics::{counter, gauge, histogram};
 use tokio::time::Instant;
 use tracing::{info, instrument, warn};
 
@@ -118,6 +118,7 @@ pub struct PbftCore<C> {
     reorder_commits: HashMap<SeqNum, Vec<(Commit, SigBytes)>>,
     reorder_checkpoints: BTreeMap<SeqNum, Vec<(Checkpoint, SigBytes)>>,
     // TODO reorder messages from later views
+    propose_starts: HashMap<SeqNum, Instant>,
 }
 
 #[derive(Debug, BorshSerialize, BorshDeserialize)]
@@ -170,6 +171,7 @@ impl<C> PbftCore<C> {
             reorder_prepares,
             reorder_commits,
             reorder_checkpoints,
+            propose_starts,
         ) = Default::default();
         Self {
             context,
@@ -183,6 +185,7 @@ impl<C> PbftCore<C> {
             reorder_prepares,
             reorder_commits,
             reorder_checkpoints,
+            propose_starts,
         }
     }
 
@@ -335,11 +338,11 @@ impl<C: PbftCoreContext> PbftCore<C> {
 
     async fn close_batch(&mut self) {
         self.seq_num += 1;
-        let digest = Default::default(); // will be filled by crypto worker
+        self.propose_starts.insert(self.seq_num, Instant::now());
         let pre_prepare = PrePrepare {
             view_num: self.view_num,
             seq_num: self.seq_num,
-            digest,
+            digest: Default::default(), // will be filled by crypto worker
         };
         let requests = self
             .pending_requests
@@ -496,6 +499,10 @@ impl<C: PbftCoreContext> PbftCore<C> {
             .insert(commit.replica_index, (commit, sig));
         if self.config.params.slot_committed(slot) {
             info!(self.config.replica_index, "Slot {seq_num} is committed");
+            if self.config.is_view_leader(self.view_num) {
+                let elapsed = self.propose_starts.remove(&seq_num).unwrap().elapsed();
+                histogram!("pbft_commit_latency", "replica_index" => self.config.replica_index.to_string()).record(elapsed.as_secs_f64());
+            }
             self.execute_slots().await;
         }
     }
