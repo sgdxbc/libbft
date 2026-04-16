@@ -3,6 +3,8 @@
 The academic codebase for painless BFT researching and evaluation.
 
 [![CI](https://github.com/sgdxbc/libbft/actions/workflows/ci.yml/badge.svg)](https://github.com/sgdxbc/libbft/actions/workflows/ci.yml)
+![License](https://img.shields.io/badge/license-AGPL--3.0-orange.svg)
+[![Scc Count Badge](https://sloc.xyz/github/sgdxbc/libbft/?category=code&lower=true)](https://github.com/sgdxbc/libbft/)
 
 ## Highlights
 
@@ -12,6 +14,7 @@ No more meditation for reasoning about why it stuck or why it runs so slow.
 
 <details>
 <summary>Screenshots</summary>  
+
 ![Jaeger screenshot](./docs/screenshots/jaeger.png)
 ![Prometheus throughput screenshot](./docs/screenshots/prometheus-throughput.png)
 ![Prometheus latency screenshot](./docs/screenshots/prometheus-latency.png)
