@@ -3,7 +3,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use bytes::Buf;
 
 use crate::{
-    crypto::{SigScheme, DigestScheme, SigBytes},
+    crypto::{DigestScheme, SigBytes, SigScheme},
     pbft::core::Checkpoint,
 };
 
@@ -61,9 +61,9 @@ impl<C: PbftCryptoContext> PbftWorker<C> {
 
     pub fn ingress(&self, mut bytes: &[u8], sig: &SigBytes) -> anyhow::Result<PbftMessage> {
         let data_len = bytes.try_get_u32_le()? as usize;
-        let Some((data_bytes, piggyback_bytes)) = bytes.split_at_checked(data_len) else {
-            anyhow::bail!("Invalid message: data length prefix exceeds actual length");
-        };
+        let (data_bytes, piggyback_bytes) = bytes
+            .split_at_checked(data_len)
+            .context("Invalid message: data length prefix exceeds actual length")?;
         let data =
             borsh::from_slice(data_bytes).context("Failed to deserialize verifiable data")?;
         if !matches!(data, PbftVerifiableData::PrePrepare(_)) {

@@ -6,7 +6,7 @@ use tracing::{instrument, warn};
 use crate::crypto::{PartialSigBytes, SigBytes};
 
 pub type ReplicaIndex = crate::types::ReplicaIndex;
-type BlockDigest = crate::crypto::Digest; // we will call this `block`
+pub type BlockDigest = crate::crypto::Digest; // we will call this `block`
 type Height = u64;
 
 pub struct HotStuffParams {
@@ -60,13 +60,13 @@ pub struct HotStuffNode {
     pub parent: BlockDigest,
     pub commands: Vec<HotStuffCommand>,
     pub height: Height,
-    justify: QuorumCert,
+    pub justify: QuorumCert,
 }
 
 #[derive(Debug, BorshSerialize, BorshDeserialize, Clone)]
 pub struct QuorumCert {
-    block: BlockDigest,
-    sig: SigBytes,
+    pub block: BlockDigest,
+    pub sig: SigBytes,
 }
 
 pub struct HotStuffCore<C> {
