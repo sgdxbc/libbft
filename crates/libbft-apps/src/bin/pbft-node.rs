@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use anyhow::Context;
 use libbft::{
     crypto::{Digest, DummyCrypto},
-    event::Emit,
+    event::{AsEmit, Emit},
     pbft::{
         PbftCoreConfig, PbftEgressWorker, PbftIngressWorker, PbftParams, PbftProtocol, PbftRequest,
         events::Deliver,
@@ -70,11 +70,15 @@ async fn main() -> anyhow::Result<()> {
     } else {
         &mut None
     };
-    protocol.register(emit_request, &mut ingress, &mut egress, &mut snapshot_tx);
-    Emit::<Deliver>::set_tx(&mut protocol, deliver_tx);
-    ingress.register(&mut network);
-    egress.register(&mut protocol);
-    network.register(&mut egress);
+    protocol.register(
+        AsEmit(emit_request),
+        AsEmit(&mut ingress).and(AsEmit(&mut egress)),
+        AsEmit(&mut snapshot_tx),
+    );
+    Emit::<Deliver>::install(&mut AsEmit(&mut protocol), deliver_tx);
+    ingress.register(AsEmit(&mut network));
+    egress.register(AsEmit(&mut protocol));
+    network.register(AsEmit(&mut egress));
 
     join_set.spawn({
         let token = token.clone();

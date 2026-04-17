@@ -2,7 +2,7 @@ use std::{collections::HashMap, net::SocketAddr};
 
 use bytes::Buf;
 use futures_util::{SinkExt, StreamExt, future::OptionFuture};
-use libbft::event::{Emit, EventReceiver, EventSender};
+use libbft::event::{AsEmit, Emit, EventReceiver, EventSender, EventSenderSlot};
 use tokio::{
     net::{TcpListener, TcpStream},
     select,
@@ -54,13 +54,13 @@ impl PeerNetwork {
         }
     }
 
-    pub fn register(&self, emit_send_bytes: &mut impl Emit<events::SendBytes>) {
-        emit_send_bytes.set_tx(self.send_bytes_tx.clone());
+    pub fn register(&self, mut emit_send_bytes: impl Emit<events::SendBytes>) {
+        emit_send_bytes.install(self.send_bytes_tx.clone());
     }
 }
 
-impl Emit<events::HandleBytes> for PeerNetwork {
-    fn tx_slot(&mut self) -> &mut Option<EventSender<events::HandleBytes>> {
+impl EventSenderSlot<events::HandleBytes> for PeerNetwork {
+    fn sender_slot(&mut self) -> &mut Option<EventSender<events::HandleBytes>> {
         &mut self.handle_bytes_tx
     }
 }
@@ -79,7 +79,10 @@ impl PeerNetwork {
             Remote::Connect(addr) => addr,
         };
         let mut worker = ConnectionWorker::new(remote);
-        Emit::<events::HandleBytes>::set_tx(&mut worker, self.handle_bytes_tx.clone().unwrap());
+        Emit::<events::HandleBytes>::install(
+            &mut AsEmit(&mut worker),
+            self.handle_bytes_tx.clone().unwrap(),
+        );
 
         if !self.connection_tx_map.contains_key(&remote_addr)
         // the case of simultaneous mutual connection attempts. this only happens when spawning
@@ -191,8 +194,8 @@ impl ConnectionWorker {
     }
 }
 
-impl Emit<events::HandleBytes> for ConnectionWorker {
-    fn tx_slot(&mut self) -> &mut Option<EventSender<events::HandleBytes>> {
+impl EventSenderSlot<events::HandleBytes> for ConnectionWorker {
+    fn sender_slot(&mut self) -> &mut Option<EventSender<events::HandleBytes>> {
         &mut self.handle_bytes_tx
     }
 }

@@ -8,7 +8,7 @@ use tracing::{Instrument, Span, instrument, warn};
 
 use crate::{
     crypto::SigBytes,
-    event::{Emit, EventReceiver, EventSender},
+    event::{Emit, EventReceiver, EventSender, EventSenderSlot},
 };
 
 mod core;
@@ -72,7 +72,7 @@ pub struct PbftProtocol {
     snapshot_rx: EventReceiver<events::Snapshot>,
 }
 
-pub struct PbftCoreContextState {
+struct PbftCoreContextState {
     message_tx: Option<EventSender<events::SendMessage>>,
     deliver_tx: Option<EventSender<events::Deliver>>,
 }
@@ -100,26 +100,24 @@ impl PbftProtocol {
 
     pub fn register(
         &self,
-        emit_request: &mut impl Emit<events::HandleRequest>,
-        emit_signed_message: &mut impl Emit<events::HandleMessage>,
-        emit_loopback_message: &mut impl Emit<events::HandleMessage>,
-        emit_snapshot: &mut impl Emit<events::Snapshot>,
+        mut emit_request: impl Emit<events::HandleRequest>,
+        mut emit_message: impl Emit<events::HandleMessage>,
+        mut emit_snapshot: impl Emit<events::Snapshot>,
     ) {
-        emit_request.set_tx(self.request_tx.clone());
-        emit_signed_message.set_tx(self.message_tx.clone());
-        emit_loopback_message.set_tx(self.message_tx.clone());
-        emit_snapshot.set_tx(self.snapshot_tx.clone());
+        emit_request.install(self.request_tx.clone());
+        emit_message.install(self.message_tx.clone());
+        emit_snapshot.install(self.snapshot_tx.clone());
     }
 }
 
-impl Emit<events::SendMessage> for PbftProtocol {
-    fn tx_slot(&mut self) -> &mut Option<EventSender<events::SendMessage>> {
+impl EventSenderSlot<events::SendMessage> for PbftProtocol {
+    fn sender_slot(&mut self) -> &mut Option<EventSender<events::SendMessage>> {
         &mut self.core.context.message_tx
     }
 }
 
-impl Emit<events::Deliver> for PbftProtocol {
-    fn tx_slot(&mut self) -> &mut Option<EventSender<events::Deliver>> {
+impl EventSenderSlot<events::Deliver> for PbftProtocol {
+    fn sender_slot(&mut self) -> &mut Option<EventSender<events::Deliver>> {
         &mut self.core.context.deliver_tx
     }
 }
@@ -223,13 +221,15 @@ impl<C: workers::PbftCryptoContext> PbftIngressWorker<C> {
         }
     }
 
-    pub fn register(&mut self, emit_handle_bytes: &mut impl Emit<events::HandleBytes>) {
-        emit_handle_bytes.set_tx(self.bytes_tx.clone());
+    pub fn register(&mut self, mut emit_handle_bytes: impl Emit<events::HandleBytes>) {
+        emit_handle_bytes.install(self.bytes_tx.clone());
     }
 }
 
-impl<C: workers::PbftCryptoContext> Emit<events::HandleMessage> for PbftIngressWorker<C> {
-    fn tx_slot(&mut self) -> &mut Option<EventSender<events::HandleMessage>> {
+impl<C: workers::PbftCryptoContext> EventSenderSlot<events::HandleMessage>
+    for PbftIngressWorker<C>
+{
+    fn sender_slot(&mut self) -> &mut Option<EventSender<events::HandleMessage>> {
         &mut self.signed_message_tx
     }
 }
@@ -305,19 +305,19 @@ impl<C: workers::PbftCryptoContext> PbftEgressWorker<C> {
         }
     }
 
-    pub fn register(&mut self, emit_send_message: &mut impl Emit<events::SendMessage>) {
-        emit_send_message.set_tx(self.message_tx.clone());
+    pub fn register(&mut self, mut emit_send_message: impl Emit<events::SendMessage>) {
+        emit_send_message.install(self.message_tx.clone());
     }
 }
 
-impl<C: workers::PbftCryptoContext> Emit<events::SendBytes> for PbftEgressWorker<C> {
-    fn tx_slot(&mut self) -> &mut Option<EventSender<events::SendBytes>> {
+impl<C: workers::PbftCryptoContext> EventSenderSlot<events::SendBytes> for PbftEgressWorker<C> {
+    fn sender_slot(&mut self) -> &mut Option<EventSender<events::SendBytes>> {
         &mut self.bytes_tx
     }
 }
 
-impl<C: workers::PbftCryptoContext> Emit<events::HandleMessage> for PbftEgressWorker<C> {
-    fn tx_slot(&mut self) -> &mut Option<EventSender<events::HandleMessage>> {
+impl<C: workers::PbftCryptoContext> EventSenderSlot<events::HandleMessage> for PbftEgressWorker<C> {
+    fn sender_slot(&mut self) -> &mut Option<EventSender<events::HandleMessage>> {
         &mut self.loopback_tx
     }
 }

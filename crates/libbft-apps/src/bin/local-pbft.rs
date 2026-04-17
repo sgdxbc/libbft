@@ -3,7 +3,7 @@ use std::{collections::HashMap, env::var, net::SocketAddr, time::Duration};
 use anyhow::Context;
 use libbft::{
     crypto::{Digest, DummyCrypto},
-    event::Emit,
+    event::{AsEmit, Emit},
     pbft::{
         PbftCoreConfig, PbftEgressWorker, PbftIngressWorker, PbftParams, PbftProtocol, PbftRequest,
         events::{Deliver, SendBytes},
@@ -60,18 +60,22 @@ async fn main() -> anyhow::Result<()> {
 
         let emit_request = if i == 0 { &mut request_tx } else { &mut None };
         let mut snapshot_tx = None;
-        protocol.register(emit_request, &mut ingress, &mut egress, &mut snapshot_tx);
+        protocol.register(
+            AsEmit(emit_request),
+            AsEmit(&mut ingress).and(AsEmit(&mut egress)),
+            AsEmit(&mut snapshot_tx),
+        );
         snapshot_tx_vec.push(snapshot_tx.unwrap());
         let mut node_bytes_tx = None;
-        ingress.register(&mut node_bytes_tx);
+        ingress.register(AsEmit(&mut node_bytes_tx));
         let node_bytes_tx = node_bytes_tx.unwrap();
         node_bytes_tx_map.insert(replica_addr(i as _), node_bytes_tx);
-        egress.register(&mut protocol);
+        egress.register(AsEmit(&mut protocol));
 
         let (deliver_tx, deliver_rx) = channel(1000);
-        Emit::<Deliver>::set_tx(&mut protocol, deliver_tx);
+        Emit::<Deliver>::install(&mut AsEmit(&mut protocol), deliver_tx);
         deliver_rx_vec.push(deliver_rx);
-        Emit::<SendBytes>::set_tx(&mut egress, fabric_bytes_tx.clone());
+        Emit::<SendBytes>::install(&mut AsEmit(&mut egress), fabric_bytes_tx.clone());
 
         join_set.spawn({
             let token = token.clone();
