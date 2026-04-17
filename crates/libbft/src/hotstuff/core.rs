@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use borsh::{BorshDeserialize, BorshSerialize};
+use tokio::time::Instant;
 use tracing::{instrument, warn};
 
 use crate::crypto::{PartialSigBytes, SigBytes};
@@ -185,7 +186,8 @@ impl<C: HotStuffCoreContext> HotStuffCore<C> {
     }
 
     #[instrument(skip(self))]
-    pub async fn on_tick(&mut self) {
+    pub async fn on_tick(&mut self, now: Instant) {
+        let _ = now;
         //
     }
 
@@ -253,7 +255,7 @@ impl<C: HotStuffCoreContext> HotStuffCore<C> {
         self.update(&block).await;
         if let Some(nodes) = self.reorder_nodes.remove(&block) {
             for (node, block) in nodes {
-                self.handle_generic(node, block).await;
+                Box::pin(self.handle_generic(node, block)).await;
             }
         }
         if let Some(quorum_cert) = self.reorder_quorum_certs.remove(&block) {
@@ -295,7 +297,13 @@ impl<C: HotStuffCoreContext> HotStuffCore<C> {
         }
         if &self.nodes[block2].parent == block1 && &self.nodes[block1].parent == block0 {
             let block0 = block0.clone();
-            commit(block, &self.executed_block, &self.nodes, &mut self.context).await;
+            commit(
+                block,
+                &self.executed_block,
+                &mut self.nodes,
+                &mut self.context,
+            )
+            .await;
             self.executed_block = block0;
         }
     }
@@ -328,11 +336,20 @@ impl<C: HotStuffCoreContext> HotStuffCore<C> {
 async fn commit(
     block: &BlockDigest,
     executed_block: &BlockDigest,
-    nodes: &HashMap<BlockDigest, HotStuffNode>,
+    nodes: &mut HashMap<BlockDigest, HotStuffNode>,
     context: &mut impl HotStuffCoreContext,
 ) {
     if nodes[executed_block].height < nodes[block].height {
-        Box::pin(commit(&nodes[block].parent, executed_block, nodes, context)).await;
-        context.deliver(nodes[block].clone()).await;
+        Box::pin(commit(
+            &nodes[block].parent.clone(),
+            executed_block,
+            nodes,
+            context,
+        ))
+        .await;
+        // garbage collection is omitted in the original paper, here is a minimal implementation
+        // that ensures long-term evaluation is feasible with limited memory
+        // if the f slowest replicas miss any committed block, they will never be able to catch up
+        context.deliver(nodes.remove(block).unwrap()).await;
     }
 }

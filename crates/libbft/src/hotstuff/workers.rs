@@ -4,13 +4,13 @@ use bytes::Buf;
 
 use crate::{
     crypto::{DigestScheme, PartialSigBytes, ThresholdSigScheme},
-    hotstuff::core::{BlockDigest, HotStuffMessage, HotStuffNode, QuorumCert, ReplicaIndex},
+    hotstuff::core::{BlockDigest, HotStuffMessage, HotStuffNode, ReplicaIndex},
 };
 
 pub trait HotStuffCryptoContext: ThresholdSigScheme + DigestScheme {}
 impl<C: ThresholdSigScheme + DigestScheme> HotStuffCryptoContext for C {}
 
-struct HotStuffWorker<C> {
+pub struct HotStuffWorker<C> {
     context: C,
 }
 
@@ -27,7 +27,7 @@ enum HotStuffNetworkMessage {
 }
 
 impl<C: HotStuffCryptoContext> HotStuffWorker<C> {
-    pub fn egress_generic(&self, node: HotStuffNode) -> (Vec<u8>, BlockDigest) {
+    pub fn egress_generic(&self, node: &HotStuffNode) -> (Vec<u8>, BlockDigest) {
         let node_bytes = borsh::to_vec(&node).unwrap();
         let message_bytes = borsh::to_vec(&HotStuffNetworkMessage::Generic).unwrap();
         (
@@ -42,12 +42,12 @@ impl<C: HotStuffCryptoContext> HotStuffWorker<C> {
     }
 
     // for loopback
-    pub fn sign_vote(&self, block: BlockDigest) -> PartialSigBytes {
+    pub fn sign_vote(&self, block: &BlockDigest) -> PartialSigBytes {
         self.context.partial_sign(&block.0)
     }
 
     pub fn egress_vote(&self, block: BlockDigest, replica_index: ReplicaIndex) -> Vec<u8> {
-        let partial_sig = self.sign_vote(block.clone());
+        let partial_sig = self.sign_vote(&block);
         borsh::to_vec(&HotStuffNetworkMessage::Vote(
             block,
             partial_sig,
