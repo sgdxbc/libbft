@@ -5,12 +5,11 @@ use metrics::{counter, gauge, histogram};
 use tokio::time::Instant;
 use tracing::{info, instrument, warn};
 
-use crate::crypto::SigBytes;
-
 pub type ReplicaIndex = crate::types::ReplicaIndex;
 pub type ViewNum = u64;
 pub type SeqNum = u64;
 pub type Digest = crate::crypto::Digest;
+type SigBytes = crate::crypto::SigBytes;
 
 pub struct PbftParams {
     pub num_replicas: usize,

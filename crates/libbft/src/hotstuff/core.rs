@@ -4,11 +4,11 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use tokio::time::Instant;
 use tracing::{instrument, warn};
 
-use crate::crypto::{PartialSigBytes, SigBytes};
-
 pub type ReplicaIndex = crate::types::ReplicaIndex;
 pub type BlockDigest = crate::crypto::Digest; // we will call this `block`
 type Height = u64;
+type PartialSigBytes = crate::crypto::PartialSigBytes;
+type SigBytes = crate::crypto::SigBytes;
 
 pub struct HotStuffParams {
     pub num_replicas: usize,
@@ -116,7 +116,7 @@ impl<C> HotStuffCore<C> {
             executed_block: GENESIS,
             highest_quorum_cert: QuorumCert {
                 block: GENESIS,
-                sig: SigBytes(Default::default()),
+                sig: crate::crypto::SigBytes(Default::default()),
             },
             leaf_block: GENESIS,
             leader,

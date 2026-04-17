@@ -26,6 +26,7 @@ No more meditation for reasoning about *where it stuck* or *why it runs so slow*
 
 **Streamlined protocol implementations in pure state machines.**
 Core protocol logics are completely decoupled with peripheral I/O framework and are suitable for property-based testing.
+Also optimized for self-contained and portability.
 
 **Highly incremental development workflow.**
 Start from (property-based) test cases.
