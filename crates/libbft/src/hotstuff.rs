@@ -1,2 +1,2 @@
 #[allow(unused)]
-pub mod core;
+mod core;

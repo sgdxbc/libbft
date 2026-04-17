@@ -82,6 +82,27 @@ impl SigScheme for DummyCrypto {
     }
 }
 
+impl ThresholdSigScheme for DummyCrypto {
+    const PARTIAL_SIG_BYTES_LEN: usize = 0;
+
+    const SIG_BYTES_LEN: usize = 0;
+
+    fn partial_sign(&self, _bytes: &[u8]) -> PartialSigBytes {
+        PartialSigBytes(Default::default())
+    }
+
+    fn combine(
+        &self,
+        _partial_sigs: impl IntoIterator<Item = (ReplicaIndex, PartialSigBytes)>,
+    ) -> anyhow::Result<SigBytes> {
+        Ok(SigBytes(Default::default()))
+    }
+
+    fn verify(&self, _bytes: &[u8], _sig: &SigBytes) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
 mod debug_impl {
     impl std::fmt::Debug for super::Digest {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

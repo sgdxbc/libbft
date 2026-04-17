@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use tracing::warn;
+use tracing::{instrument, warn};
 
 use crate::crypto::{PartialSigBytes, SigBytes};
 
@@ -149,6 +149,7 @@ impl HotStuffParams {
 }
 
 impl<C: HotStuffCoreContext> HotStuffCore<C> {
+    #[instrument(skip(self))]
     pub async fn on_command(&mut self, command: HotStuffCommand) {
         self.pending_commands.push(command);
         if self.leaf_block == self.highest_quorum_cert.block {
@@ -156,6 +157,7 @@ impl<C: HotStuffCoreContext> HotStuffCore<C> {
         }
     }
 
+    #[instrument(skip(self))]
     pub async fn on_message(&mut self, message: HotStuffMessage) {
         match message {
             HotStuffMessage::Generic(block, node) => self.handle_generic(block, node).await,
@@ -165,6 +167,7 @@ impl<C: HotStuffCoreContext> HotStuffCore<C> {
         }
     }
 
+    #[instrument(skip(self))]
     pub async fn on_quorum_cert(&mut self, quorum_cert: QuorumCert) {
         if !self.nodes.contains_key(&quorum_cert.block) {
             let replaced = self
@@ -181,6 +184,7 @@ impl<C: HotStuffCoreContext> HotStuffCore<C> {
         self.update_highest_quorum_cert(quorum_cert).await
     }
 
+    #[instrument(skip(self))]
     pub async fn on_tick(&mut self) {
         //
     }
