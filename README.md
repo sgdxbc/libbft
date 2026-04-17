@@ -7,7 +7,7 @@ The academic codebase for painless BFT researching and evaluation.
 
 [![CI](https://github.com/sgdxbc/libbft/actions/workflows/ci.yml/badge.svg)](https://github.com/sgdxbc/libbft/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-orange.svg)
-[![Scc Count Badge](https://sloc.xyz/github/sgdxbc/libbft/?category=code&lower=true)](https://github.com/sgdxbc/libbft/)
+![Code lines](./docs/loc-badge.svg)
 </div>
 
 ## Highlights
