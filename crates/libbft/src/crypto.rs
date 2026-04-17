@@ -2,7 +2,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 
 use crate::types::ReplicaIndex;
 
-#[derive(BorshSerialize, BorshDeserialize, Clone, Default, PartialEq, Eq)]
+#[derive(BorshSerialize, BorshDeserialize, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Digest(pub Vec<u8>);
 
 #[derive(BorshSerialize, BorshDeserialize, Clone)]

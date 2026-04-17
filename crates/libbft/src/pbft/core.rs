@@ -224,6 +224,14 @@ impl<C: PbftCoreContext> PbftCore<C> {
         self.pending_requests.push(request);
         if self.seq_num < self.last_stable() + self.config.window_size {
             self.close_batch().await;
+        } else {
+            warn!(
+                self.config.replica_index,
+                "Window exhausted: seq_num {}, last stable {}, window size {}",
+                self.seq_num,
+                self.last_stable(),
+                self.config.window_size
+            );
         }
     }
 

@@ -3,5 +3,6 @@
 addrs
 bft
 Borsh
+hotstuff
 libbft
 pbft
