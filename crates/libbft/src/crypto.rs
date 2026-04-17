@@ -8,7 +8,11 @@ pub struct Digest(pub Vec<u8>);
 #[derive(BorshSerialize, BorshDeserialize, Clone)]
 pub struct SigBytes(pub Vec<u8>);
 
-pub trait CryptoScheme {
+pub trait DigestScheme {
+    fn digest(&self, bytes: &[u8]) -> Digest;
+}
+
+pub trait SigScheme {
     const SIG_BYTES_LEN: usize;
 
     fn sign(&self, bytes: &[u8]) -> SigBytes;
@@ -19,14 +23,12 @@ pub trait CryptoScheme {
         sig: &SigBytes,
         replica_index: ReplicaIndex,
     ) -> anyhow::Result<()>;
-
-    fn digest(&self, bytes: &[u8]) -> Digest;
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone)]
 pub struct PartialSigBytes(pub Vec<u8>);
 
-pub trait ThresholdCryptoScheme {
+pub trait ThresholdSigScheme {
     const PARTIAL_SIG_BYTES_LEN: usize;
 
     const SIG_BYTES_LEN: usize;
@@ -57,12 +59,14 @@ pub trait ThresholdCryptoScheme {
 
 pub struct DummyCrypto;
 
-impl CryptoScheme for DummyCrypto {
-    const SIG_BYTES_LEN: usize = 0;
-
+impl DigestScheme for DummyCrypto {
     fn digest(&self, _bytes: &[u8]) -> Digest {
         Digest([0xde, 0xad, 0xbe, 0xef].into())
     }
+}
+
+impl SigScheme for DummyCrypto {
+    const SIG_BYTES_LEN: usize = 0;
 
     fn sign(&self, _bytes: &[u8]) -> SigBytes {
         SigBytes(Default::default())

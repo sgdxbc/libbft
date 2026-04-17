@@ -3,14 +3,14 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use bytes::Buf;
 
 use crate::{
-    crypto::{CryptoScheme, SigBytes},
+    crypto::{SigScheme, DigestScheme, SigBytes},
     pbft::core::Checkpoint,
 };
 
 use super::core::{Commit, PbftMessage, PbftParams, PrePrepare, Prepare};
 
-pub trait PbftCryptoContext: CryptoScheme {}
-impl<C: CryptoScheme> PbftCryptoContext for C {}
+pub trait PbftCryptoContext: SigScheme + DigestScheme {}
+impl<C: SigScheme + DigestScheme> PbftCryptoContext for C {}
 
 // both ingress and egress (happen to) need these same states
 pub struct PbftWorker<C> {
@@ -27,11 +27,13 @@ enum PbftVerifiableData {
     Checkpoint(Checkpoint),
 }
 
-impl<C: PbftCryptoContext> PbftWorker<C> {
+impl<C> PbftWorker<C> {
     pub fn new(context: C, params: PbftParams) -> Self {
         Self { context, params }
     }
+}
 
+impl<C: PbftCryptoContext> PbftWorker<C> {
     pub fn egress(&self, message: &mut PbftMessage) -> (Vec<u8>, SigBytes) {
         let mut piggyback_bytes = vec![];
         let verifiable_data = match message {

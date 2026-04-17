@@ -36,6 +36,7 @@ pub trait HotStuffCoreContext {
     ) -> impl Future<Output = ()>;
 
     // TODO send (unauthenticated) NewView
+    // there should also be other sync messages for transferring node data, omitted in the paper
 
     // the ready `QuorumCert` will be passed into `on_quorum_cert`
     fn make_quorum_cert(
