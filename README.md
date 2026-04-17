@@ -1,14 +1,14 @@
-<center>
+<div align="center">
 <img src="./docs/logo.svg" width=128>
 
 # $`\mathtt{lib}\beta\phi\tau`$
 
 The academic codebase for painless BFT researching and evaluation.
-</center>
 
 [![CI](https://github.com/sgdxbc/libbft/actions/workflows/ci.yml/badge.svg)](https://github.com/sgdxbc/libbft/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-orange.svg)
 [![Scc Count Badge](https://sloc.xyz/github/sgdxbc/libbft/?category=code&lower=true)](https://github.com/sgdxbc/libbft/)
+</div>
 
 ## Highlights
 
