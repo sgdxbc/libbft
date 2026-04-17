@@ -1,6 +1,10 @@
+<center>
+<img src="./docs/logo.svg" width=128>
+
 # $`\mathtt{lib}\beta\phi\tau`$
 
 The academic codebase for painless BFT researching and evaluation.
+</center>
 
 [![CI](https://github.com/sgdxbc/libbft/actions/workflows/ci.yml/badge.svg)](https://github.com/sgdxbc/libbft/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-AGPL--3.0-orange.svg)
@@ -31,7 +35,7 @@ Then bring your own cluster or AWS credential.
 This codebase enables addressing issues with minimum infrastructures that can reproduce them before moving on to more involved setups.
 
 **Performant and simple protocol code written in Rust.**
-You probably cannot get better performance from any other implementation without longer code.
+You probably cannot get better performance from any implementation with this amount of code.
 
 ## Quick Start
 
