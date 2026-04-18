@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
 use borsh::{BorshDeserialize, BorshSerialize};
+use metrics::counter;
 use tokio::time::Instant;
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 pub type ReplicaIndex = crate::types::ReplicaIndex;
 pub type BlockDigest = crate::crypto::Digest; // we will call this `block`
@@ -291,8 +292,10 @@ impl<C: HotStuffCoreContext> HotStuffCore<C> {
         partial_sig: PartialSigBytes,
     ) {
         if !self.nodes.contains_key(&block) {
-            warn!(
-                self.config.replica_index,
+            // suppress false positive by garbage collected blocks
+            debug!(
+                target: "unknown_voted_node",
+                replica_index = self.config.replica_index,
                 "vote for unknown node {block:?} from replica {replica_index}"
             );
             return;
@@ -319,13 +322,7 @@ impl<C: HotStuffCoreContext> HotStuffCore<C> {
         if &self.nodes[block2].parent == block1 && &self.nodes[block1].parent == block0 {
             info!(self.config.replica_index, "committing block {block0:?}");
             let block0 = block0.clone();
-            commit(
-                &block0,
-                &self.executed_block,
-                &mut self.nodes,
-                &mut self.context,
-            )
-            .await;
+            self.commit(&block0).await;
             self.executed_block = block0;
         }
     }
@@ -342,6 +339,23 @@ impl<C: HotStuffCoreContext> HotStuffCore<C> {
         }
     }
 
+    async fn commit(&mut self, block: &BlockDigest) {
+        if self.nodes[&self.executed_block].height < self.nodes[block].height {
+            let parent_block = self.nodes[block].parent.clone();
+            Box::pin(self.commit(&parent_block)).await;
+            // garbage collection is omitted in the original paper, here is a minimal implementation
+            // that ensures long-term evaluation is feasible with limited memory
+            // if the f slowest replicas miss any committed block, they will never be able to catch up
+            self.nodes.remove(&parent_block);
+            self.votes.remove(&parent_block);
+
+            counter!("hotstuff_committed_blocks").increment(1);
+            counter!("hotstuff_committed_commands")
+                .increment(self.nodes[block].commands.len() as u64);
+            self.context.deliver(self.nodes[block].clone()).await;
+        }
+    }
+
     async fn beat(&mut self) {
         if self.is_leader() {
             let commands = self
@@ -352,23 +366,6 @@ impl<C: HotStuffCoreContext> HotStuffCore<C> {
         } else {
             self.pending_commands.clear();
         }
-    }
-}
-
-async fn commit(
-    block: &BlockDigest,
-    executed_block: &BlockDigest,
-    nodes: &mut HashMap<BlockDigest, HotStuffNode>,
-    context: &mut impl HotStuffCoreContext,
-) {
-    if nodes[executed_block].height < nodes[block].height {
-        let parent_block = nodes[block].parent.clone();
-        Box::pin(commit(&parent_block, executed_block, nodes, context)).await;
-        // garbage collection is omitted in the original paper, here is a minimal implementation
-        // that ensures long-term evaluation is feasible with limited memory
-        // if the f slowest replicas miss any committed block, they will never be able to catch up
-        nodes.remove(&parent_block);
-        context.deliver(nodes[block].clone()).await;
     }
 }
 

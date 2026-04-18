@@ -617,6 +617,7 @@ dependencies = [
  "anyhow",
  "libbft",
  "libbft-network",
+ "metrics",
  "metrics-exporter-prometheus",
  "opentelemetry",
  "opentelemetry-otlp",

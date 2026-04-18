@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     env::{args, var},
     net::SocketAddr,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::Context;
@@ -22,6 +22,7 @@ use libbft::{
     types::ReplicaIndex,
 };
 use libbft_apps::{init_metrics_exporter, init_telemetry};
+use metrics::histogram;
 use tokio::{signal::ctrl_c, sync::mpsc::channel, task::JoinSet, time::sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
@@ -228,6 +229,7 @@ impl PbftNetwork {
 
     async fn run_workload_loop(&mut self) -> anyhow::Result<()> {
         loop {
+            let round_start = Instant::now();
             let span = info_span!("Workload", round = self.count);
             self.request_tx
                 .as_ref()
@@ -254,6 +256,7 @@ impl PbftNetwork {
                         .context("Failed to trigger snapshot")?;
                 }
             }
+            histogram!("deliver_latency").record(round_start.elapsed().as_secs_f64());
         }
     }
 }
@@ -345,6 +348,7 @@ impl HotStuffNetwork {
 
     async fn run_workload_loop(&mut self) -> anyhow::Result<()> {
         loop {
+            let round_start = Instant::now();
             let span = info_span!("Workload", round = self.count);
             for command_tx in &self.command_tx_vec {
                 command_tx
@@ -356,13 +360,17 @@ impl HotStuffNetwork {
                     .context("Submit command failed")?;
             }
             for (i, deliver_rx) in self.deliver_rx_vec.iter_mut().enumerate() {
-                deliver_rx
-                    .recv()
-                    .await
-                    .with_context(|| format!("Node {i} deliver round {}", self.count))?;
+                while {
+                    let (block, _) = deliver_rx
+                        .recv()
+                        .await
+                        .with_context(|| format!("Node {i} deliver round {}", self.count))?;
+                    block.commands.is_empty()
+                } {}
                 tracing::debug!("Node {i} delivered");
             }
             self.count += 1;
+            histogram!("deliver_latency").record(round_start.elapsed().as_secs_f64());
         }
     }
 }
