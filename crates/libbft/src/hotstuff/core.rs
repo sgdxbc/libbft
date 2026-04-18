@@ -150,7 +150,7 @@ impl HotStuffParams {
 }
 
 impl<C: HotStuffCoreContext> HotStuffCore<C> {
-    #[instrument(skip(self))]
+    #[instrument(skip(self), fields(replica_index = self.config.replica_index))]
     pub async fn on_command(&mut self, command: HotStuffCommand) {
         self.pending_commands.push(command);
         if self.leaf_block == self.highest_quorum_cert.block {
@@ -158,7 +158,7 @@ impl<C: HotStuffCoreContext> HotStuffCore<C> {
         }
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self), fields(replica_index = self.config.replica_index))]
     pub async fn on_message(&mut self, message: HotStuffMessage) {
         match message {
             HotStuffMessage::Generic(block, node) => self.handle_generic(block, node).await,
@@ -168,7 +168,7 @@ impl<C: HotStuffCoreContext> HotStuffCore<C> {
         }
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self), fields(replica_index = self.config.replica_index))]
     pub async fn on_quorum_cert(&mut self, quorum_cert: QuorumCert) {
         if !self.nodes.contains_key(&quorum_cert.block) {
             let replaced = self
@@ -185,12 +185,13 @@ impl<C: HotStuffCoreContext> HotStuffCore<C> {
         self.update_highest_quorum_cert(quorum_cert).await
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self), fields(replica_index = self.config.replica_index))]
     pub async fn on_tick(&mut self, now: Instant) {
         let _ = now;
         //
     }
 
+    #[instrument(parent = None, skip(self), fields(replica_index = self.config.replica_index))]
     async fn propose(&mut self, commands: Vec<HotStuffCommand>) {
         assert!(self.is_leader());
         if commands.is_empty() {
@@ -208,6 +209,7 @@ impl<C: HotStuffCoreContext> HotStuffCore<C> {
             } + 1,
             justify: self.highest_quorum_cert.clone(),
         };
+        tracing::Span::current().record("height", node.height);
         self.context.broadcast_generic(node).await;
     }
 

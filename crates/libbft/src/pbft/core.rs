@@ -300,6 +300,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
         //
     }
 
+    #[instrument(parent = None, skip(self), fields(replica_index = self.config.replica_index, seq_num = self.seq_num))]
     async fn close_batch(&mut self) {
         self.seq_num += 1;
         self.propose_starts.insert(self.seq_num, Instant::now());
