@@ -1,9 +1,18 @@
-use std::{collections::HashMap, env::var, net::SocketAddr, time::Duration};
+use std::{
+    collections::HashMap,
+    env::{args, var},
+    net::SocketAddr,
+    time::Duration,
+};
 
 use anyhow::Context;
 use libbft::{
     crypto::{Digest, DummyCrypto},
     event::{AsEmit, Emit, EventReceiver, EventSender},
+    hotstuff::{
+        self, HotStuffCommand, HotStuffCoreConfig, HotStuffEgressWorker, HotStuffIngressWorker,
+        HotStuffParams, HotStuffProtocol, HotStuffQuorumCertWorker,
+    },
     network,
     pbft::{
         self, PbftCoreConfig, PbftEgressWorker, PbftIngressWorker, PbftParams, PbftProtocol,
@@ -17,16 +26,20 @@ use tokio::{signal::ctrl_c, sync::mpsc::channel, task::JoinSet, time::sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
-const NUM_REPLICAS: usize = 4;
-const NUM_FAULTY_REPLICAS: usize = 1;
-
-fn replica_addr(index: ReplicaIndex) -> SocketAddr {
-    ([10, 0, 0, index + 1], 3000).into()
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let telemetry = init_telemetry();
+    let protocol = args()
+        .find_map(|arg| match arg.strip_prefix("protocol=") {
+            Some(protocol @ ("pbft" | "hotstuff")) => Some(protocol.to_owned()),
+            Some(protocol) => {
+                eprintln!("Unsupported protocol: {protocol}");
+                None
+            }
+            _ => None,
+        })
+        .context("Failed to parse protocol argument")?;
+
+    let _telemetry = init_telemetry();
     init_metrics_exporter(None)?;
 
     let (fabric_bytes_tx, mut fabric_bytes_rx) = channel(1000);
@@ -35,13 +48,29 @@ async fn main() -> anyhow::Result<()> {
     let token = CancellationToken::new();
     let mut join_set = JoinSet::new();
 
-    let mut network = PbftNetwork::new();
-    network.spawn_workers(
-        &mut join_set,
-        &mut node_bytes_tx_map,
-        fabric_bytes_tx,
-        &token,
-    );
+    let mut network = match &*protocol {
+        "pbft" => {
+            let mut network = PbftNetwork::new();
+            network.spawn_workers(
+                &mut join_set,
+                &mut node_bytes_tx_map,
+                fabric_bytes_tx,
+                &token,
+            );
+            Network::Pbft(network)
+        }
+        "hotstuff" => {
+            let mut network = HotStuffNetwork::new();
+            network.spawn_workers(
+                &mut join_set,
+                &mut node_bytes_tx_map,
+                fabric_bytes_tx,
+                &token,
+            );
+            Network::HotStuff(network)
+        }
+        _ => unreachable!(),
+    };
 
     let fabric = async move {
         while let Some(((receiver_addr, bytes), span)) = fabric_bytes_rx.recv().await {
@@ -61,6 +90,12 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let workload = async move {
+        let workload = async {
+            match &mut network {
+                Network::Pbft(network) => network.run_workload_loop().await,
+                Network::HotStuff(network) => network.run_workload_loop().await,
+            }
+        };
         let interrupt = async {
             if var("CI") == Ok("true".into()) {
                 sleep(Duration::from_secs(3)).await;
@@ -71,10 +106,14 @@ async fn main() -> anyhow::Result<()> {
             anyhow::Ok(())
         };
         tokio::select! {
-            res = network.run_workload_loop() => res?,
+            res = workload => res?,
             res = interrupt => res?,
         }
-        tracing::info!("Finished {} rounds", network.count);
+        let count = match &network {
+            Network::Pbft(network) => network.count,
+            Network::HotStuff(network) => network.count,
+        };
+        tracing::info!("Finished {count} rounds");
         anyhow::Ok(())
     };
     join_set.spawn(async move {
@@ -86,15 +125,22 @@ async fn main() -> anyhow::Result<()> {
     while let Some(res) = join_set.join_next().await {
         res.unwrap()
     }
-
-    if let Some(telemetry) = telemetry {
-        telemetry.shutdown()?;
-    }
     Ok(())
 }
 
 // "network" here means node network. network transportation is done by the fabric
 // maybe need better naming
+enum Network {
+    Pbft(PbftNetwork),
+    HotStuff(HotStuffNetwork),
+}
+
+const NUM_REPLICAS: usize = 4;
+const NUM_FAULTY_REPLICAS: usize = 1;
+
+fn replica_addr(index: ReplicaIndex) -> SocketAddr {
+    ([10, 0, 0, index + 1], 3000).into()
+}
 
 #[derive(Default)]
 struct PbftNetwork {
@@ -208,6 +254,115 @@ impl PbftNetwork {
                         .context("Failed to trigger snapshot")?;
                 }
             }
+        }
+    }
+}
+
+#[derive(Default)]
+struct HotStuffNetwork {
+    command_tx_vec: Vec<EventSender<hotstuff::events::HandleCommand>>,
+    deliver_rx_vec: Vec<EventReceiver<hotstuff::events::Deliver>>,
+    count: u64,
+}
+
+impl HotStuffNetwork {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn params() -> HotStuffParams {
+        HotStuffParams {
+            num_replicas: NUM_REPLICAS,
+            num_faulty_replicas: NUM_FAULTY_REPLICAS,
+        }
+    }
+
+    fn spawn_workers(
+        &mut self,
+        join_set: &mut JoinSet<()>,
+        node_bytes_tx_map: &mut HashMap<SocketAddr, EventSender<network::events::HandleBytes>>,
+        fabric_bytes_tx: EventSender<network::events::SendBytes>,
+        token: &CancellationToken,
+    ) {
+        for i in 0..NUM_REPLICAS {
+            let config = HotStuffCoreConfig {
+                params: Self::params(),
+                replica_index: i as _,
+                max_block_size: 1,
+            };
+
+            let mut protocol = HotStuffProtocol::new(config);
+            let mut ingress = HotStuffIngressWorker::new(DummyCrypto);
+            let mut egress = HotStuffEgressWorker::new(
+                DummyCrypto,
+                (0..NUM_REPLICAS)
+                    .filter(|&index| index != i)
+                    .map(|index| (index as _, replica_addr(index as _)))
+                    .collect(),
+            );
+            let mut quorum_cert = HotStuffQuorumCertWorker::new(DummyCrypto);
+
+            let mut emit_command = None;
+            protocol.register(
+                AsEmit(&mut emit_command),
+                AsEmit(&mut ingress).and(AsEmit(&mut egress)),
+                AsEmit(&mut quorum_cert),
+            );
+            self.command_tx_vec.push(emit_command.unwrap());
+            let mut node_bytes_tx = None;
+            ingress.register(AsEmit(&mut node_bytes_tx));
+            let node_bytes_tx = node_bytes_tx.unwrap();
+            node_bytes_tx_map.insert(replica_addr(i as _), node_bytes_tx);
+            egress.register(AsEmit(&mut protocol));
+            quorum_cert.register(AsEmit(&mut protocol));
+
+            let (deliver_tx, deliver_rx) = channel(1000);
+            Emit::<hotstuff::events::Deliver>::install(&mut AsEmit(&mut protocol), deliver_tx);
+            self.deliver_rx_vec.push(deliver_rx);
+            Emit::<hotstuff::events::SendBytes>::install(
+                &mut AsEmit(&mut egress),
+                fabric_bytes_tx.clone(),
+            );
+
+            join_set.spawn({
+                let token = token.clone();
+                async move { protocol.run(&token).await }
+            });
+            join_set.spawn({
+                let token = token.clone();
+                async move { egress.run(&token).await }
+            });
+            join_set.spawn({
+                let token = token.clone();
+                async move { ingress.run(&token).await }
+            });
+            join_set.spawn({
+                let token = token.clone();
+                async move { quorum_cert.run(&token).await }
+            });
+        }
+    }
+
+    async fn run_workload_loop(&mut self) -> anyhow::Result<()> {
+        loop {
+            let span = info_span!("Workload", round = self.count);
+            for command_tx in &self.command_tx_vec {
+                command_tx
+                    .send((
+                        HotStuffCommand(self.count.to_be_bytes().into()),
+                        span.clone(),
+                    ))
+                    .await
+                    .context("Submit command failed")?;
+            }
+            for (i, deliver_rx) in self.deliver_rx_vec.iter_mut().enumerate() {
+                deliver_rx
+                    .recv()
+                    .await
+                    .with_context(|| format!("Node {i} deliver round {}", self.count))?;
+                tracing::debug!("Node {i} delivered");
+            }
+            self.count += 1;
         }
     }
 }

@@ -10,6 +10,8 @@ use crate::event::{Emit, EventReceiver, EventSender, EventSenderSlot};
 mod core;
 mod workers;
 
+pub use core::{HotStuffCommand, HotStuffCoreConfig, HotStuffParams};
+
 pub mod events {
     use crate::{crypto::PartialSigBytes, event::Event};
 
@@ -51,6 +53,8 @@ pub mod events {
     impl Event for HandleQuorumCert {
         type Value = core::QuorumCert;
     }
+
+    pub type SendBytes = crate::network::events::SendBytes;
 }
 
 pub struct HotStuffProtocol {
@@ -112,6 +116,12 @@ impl EventSenderSlot<events::Deliver> for HotStuffProtocol {
 impl EventSenderSlot<events::SendMessage> for HotStuffProtocol {
     fn sender_slot(&mut self) -> &mut Option<EventSender<events::SendMessage>> {
         &mut self.core.context.send_message_tx
+    }
+}
+
+impl EventSenderSlot<events::MakeQuorumCert> for HotStuffProtocol {
+    fn sender_slot(&mut self) -> &mut Option<EventSender<events::MakeQuorumCert>> {
+        &mut self.core.context.make_quorum_cert_tx
     }
 }
 
@@ -210,7 +220,7 @@ pub struct HotStuffEgressWorker<C> {
     send_message_tx: EventSender<events::SendMessage>,
     send_message_rx: EventReceiver<events::SendMessage>,
 
-    bytes_tx: Option<EventSender<crate::network::events::SendBytes>>,
+    bytes_tx: Option<EventSender<events::SendBytes>>,
     message_tx: Option<EventSender<events::HandleMessage>>,
 }
 
@@ -232,8 +242,8 @@ impl<C> HotStuffEgressWorker<C> {
     }
 }
 
-impl<C> EventSenderSlot<crate::network::events::SendBytes> for HotStuffEgressWorker<C> {
-    fn sender_slot(&mut self) -> &mut Option<EventSender<crate::network::events::SendBytes>> {
+impl<C> EventSenderSlot<events::SendBytes> for HotStuffEgressWorker<C> {
+    fn sender_slot(&mut self) -> &mut Option<EventSender<events::SendBytes>> {
         &mut self.bytes_tx
     }
 }
@@ -251,7 +261,7 @@ impl<C: workers::HotStuffCryptoContext> HotStuffEgressWorker<C> {
         {
             match effect {
                 events::SendMessageValue::BroadcastGeneric(node) => {
-                    let (bytes, block) = self.state.egress_generic(&node);
+                    let (bytes, block) = span.in_scope(|| self.state.egress_generic(&node));
                     let bytes = Bytes::from(bytes);
                     for (&replica_index, &addr) in &self.replica_addrs {
                         if let Err(err) = self
@@ -290,7 +300,7 @@ impl<C: workers::HotStuffCryptoContext> HotStuffEgressWorker<C> {
                             warn!("Failed to send loopback vote message: {err:#}");
                         }
                     } else {
-                        let bytes = self.state.egress_vote(block, replica_index);
+                        let bytes = span.in_scope(|| self.state.egress_vote(block, replica_index));
                         if let Err(err) = self
                             .bytes_tx
                             .as_ref()
@@ -342,7 +352,7 @@ impl<C: workers::HotStuffCryptoContext> HotStuffIngressWorker<C> {
     pub async fn run(&mut self, token: &CancellationToken) {
         while let Some(Some((bytes, span))) = token.run_until_cancelled(self.bytes_rx.recv()).await
         {
-            match self.state.ingress(bytes.as_ref()) {
+            match span.in_scope(|| self.state.ingress(bytes.as_ref())) {
                 Ok(message) => {
                     if let Err(err) = self
                         .message_tx

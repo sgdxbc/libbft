@@ -1,6 +1,7 @@
 use anyhow::Context;
 use borsh::{BorshDeserialize, BorshSerialize};
 use bytes::Buf;
+use tracing::instrument;
 
 use crate::{
     crypto::{DigestScheme, PartialSigBytes, ThresholdSigScheme},
@@ -27,9 +28,10 @@ enum HotStuffNetworkMessage {
 }
 
 impl<C: HotStuffCryptoContext> HotStuffWorker<C> {
+    #[instrument(skip(self))]
     pub fn egress_generic(&self, node: &HotStuffNode) -> (Vec<u8>, BlockDigest) {
-        let node_bytes = borsh::to_vec(&node).unwrap();
         let message_bytes = borsh::to_vec(&HotStuffNetworkMessage::Generic).unwrap();
+        let node_bytes = borsh::to_vec(&node).unwrap();
         (
             [
                 &(message_bytes.len() as u32).to_le_bytes()[..],
@@ -46,14 +48,16 @@ impl<C: HotStuffCryptoContext> HotStuffWorker<C> {
         self.context.partial_sign(&block.0)
     }
 
+    #[instrument(skip(self))]
     pub fn egress_vote(&self, block: BlockDigest, replica_index: ReplicaIndex) -> Vec<u8> {
         let partial_sig = self.sign_vote(&block);
-        borsh::to_vec(&HotStuffNetworkMessage::Vote(
+        let bytes = borsh::to_vec(&HotStuffNetworkMessage::Vote(
             block,
             partial_sig,
             replica_index,
         ))
-        .unwrap()
+        .unwrap();
+        [&(bytes.len() as u32).to_le_bytes()[..], &bytes].concat()
     }
 
     pub fn ingress(&self, mut bytes: &[u8]) -> anyhow::Result<HotStuffMessage> {

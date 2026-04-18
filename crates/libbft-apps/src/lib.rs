@@ -12,8 +12,20 @@ use tracing::Level;
 use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::{Layer, filter::Targets, layer::SubscriberExt, util::SubscriberInitExt};
 
-pub fn init_telemetry() -> Option<SdkTracerProvider> {
-    init_tracing_subscriber()
+pub struct TelemetryGuard(Option<SdkTracerProvider>);
+
+pub fn init_telemetry() -> TelemetryGuard {
+    TelemetryGuard(init_tracing_subscriber())
+}
+
+impl Drop for TelemetryGuard {
+    fn drop(&mut self) {
+        if let Some(tracer_provider) = self.0.take() {
+            if let Err(err) = tracer_provider.shutdown() {
+                eprintln!("Error shutting down tracer provider: {err:#}");
+            }
+        }
+    }
 }
 
 pub fn init_metrics_exporter(port: impl Into<Option<u16>>) -> anyhow::Result<()> {

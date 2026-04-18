@@ -1,3 +1,5 @@
+use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
+
 use borsh::{BorshDeserialize, BorshSerialize};
 
 use crate::types::ReplicaIndex;
@@ -60,8 +62,13 @@ pub trait ThresholdSigScheme {
 pub struct DummyCrypto;
 
 impl DigestScheme for DummyCrypto {
-    fn digest(&self, _bytes: &[u8]) -> Digest {
-        Digest([0xde, 0xad, 0xbe, 0xef].into())
+    fn digest(&self, bytes: &[u8]) -> Digest {
+        Digest(
+            BuildHasherDefault::<DefaultHasher>::default()
+                .hash_one(bytes)
+                .to_le_bytes()
+                .into(),
+        )
     }
 }
 

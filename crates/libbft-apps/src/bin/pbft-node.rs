@@ -33,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
         .find_map(|arg| arg.strip_prefix("index=")?.parse().ok())
         .context("invalid replica index")?;
 
-    let telemetry = init_telemetry();
+    let _telemetry = init_telemetry();
     init_metrics_exporter(9000 + index as u16)?;
 
     let mut request_tx = None;
@@ -145,10 +145,6 @@ async fn main() -> anyhow::Result<()> {
     });
     while let Some(res) = join_set.join_next().await {
         res.unwrap()
-    }
-
-    if let Some(telemetry) = telemetry {
-        telemetry.shutdown()?;
     }
     Ok(())
 }

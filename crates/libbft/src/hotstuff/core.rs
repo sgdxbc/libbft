@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use tokio::time::Instant;
-use tracing::{instrument, warn};
+use tracing::{info, instrument, warn};
 
 pub type ReplicaIndex = crate::types::ReplicaIndex;
 pub type BlockDigest = crate::crypto::Digest; // we will call this `block`
@@ -56,7 +56,7 @@ pub enum HotStuffMessage {
     Vote(BlockDigest, ReplicaIndex, PartialSigBytes),
 }
 
-#[derive(Debug, BorshSerialize, BorshDeserialize, Clone)]
+#[derive(BorshSerialize, BorshDeserialize, Clone)]
 pub struct HotStuffNode {
     pub parent: BlockDigest,
     pub commands: Vec<HotStuffCommand>,
@@ -97,7 +97,6 @@ pub const GENESIS: BlockDigest = crate::crypto::Digest(Vec::new());
 impl<C> HotStuffCore<C> {
     pub fn new(context: C, config: HotStuffCoreConfig) -> Self {
         let (
-            nodes,
             votes,
             voted_height,
             leader,
@@ -109,7 +108,20 @@ impl<C> HotStuffCore<C> {
         Self {
             context,
             config,
-            nodes,
+            nodes: [(
+                GENESIS,
+                // self-referential genesis can simplify the corner cases during initial blocks
+                HotStuffNode {
+                    parent: GENESIS,
+                    commands: vec![],
+                    height: 0,
+                    justify: QuorumCert {
+                        block: GENESIS,
+                        sig: crate::crypto::SigBytes(Default::default()),
+                    },
+                },
+            )]
+            .into(),
             votes,
             voted_height,
             locked_block: GENESIS,
@@ -202,11 +214,7 @@ impl<C: HotStuffCoreContext> HotStuffCore<C> {
         let node = HotStuffNode {
             parent: self.leaf_block.clone(),
             commands,
-            height: if self.leaf_block == GENESIS {
-                0
-            } else {
-                self.nodes[&self.leaf_block].height
-            } + 1,
+            height: self.nodes[&self.leaf_block].height + 1,
             justify: self.highest_quorum_cert.clone(),
         };
         tracing::Span::current().record("height", node.height);
@@ -214,6 +222,11 @@ impl<C: HotStuffCoreContext> HotStuffCore<C> {
     }
 
     async fn handle_generic(&mut self, block: BlockDigest, node: HotStuffNode) {
+        // TODO carefully reason about corner cases of very slow loopback generics
+        if self.is_leader() {
+            self.leaf_block = block.clone();
+        }
+
         if self.nodes.contains_key(&block) {
             assert!(!self.is_leader());
             warn!(self.config.replica_index, "duplicate block {block:?}");
@@ -235,11 +248,15 @@ impl<C: HotStuffCoreContext> HotStuffCore<C> {
                 .push((block, node));
             return;
         }
-        if node.height > self.voted_height
+
+        let node_height = node.height;
+        let justify_block = node.justify.block.clone();
+        self.nodes.insert(block.clone(), node);
+        if node_height > self.voted_height
             && (self.extends(&block, &self.locked_block)
-                || self.nodes[&node.justify.block].height > self.nodes[&self.locked_block].height)
+                || self.nodes[&justify_block].height > self.nodes[&self.locked_block].height)
         {
-            self.voted_height = node.height;
+            self.voted_height = node_height;
             self.context
                 .send_vote(self.leader, block.clone(), self.config.replica_index)
                 .await
@@ -250,11 +267,9 @@ impl<C: HotStuffCoreContext> HotStuffCore<C> {
                 "not voting for unsafe block {block:?}"
             )
         }
-        self.nodes.insert(block.clone(), node);
-        if self.is_leader() {
-            self.leaf_block = block.clone();
-        }
+
         self.update(&block).await;
+
         if let Some(nodes) = self.reorder_nodes.remove(&block) {
             for (node, block) in nodes {
                 Box::pin(self.handle_generic(node, block)).await;
@@ -298,9 +313,10 @@ impl<C: HotStuffCoreContext> HotStuffCore<C> {
             self.locked_block = block1.clone();
         }
         if &self.nodes[block2].parent == block1 && &self.nodes[block1].parent == block0 {
+            info!(self.config.replica_index, "committing block {block0:?}");
             let block0 = block0.clone();
             commit(
-                block,
+                &block0,
                 &self.executed_block,
                 &mut self.nodes,
                 &mut self.context,
@@ -352,6 +368,22 @@ async fn commit(
         // garbage collection is omitted in the original paper, here is a minimal implementation
         // that ensures long-term evaluation is feasible with limited memory
         // if the f slowest replicas miss any committed block, they will never be able to catch up
-        context.deliver(nodes.remove(block).unwrap()).await;
+        // context.deliver(nodes.remove(block).unwrap()).await;
+        context.deliver(nodes[block].clone()).await;
+    }
+}
+
+mod debug_impl {
+    use std::fmt::Debug;
+
+    impl Debug for super::HotStuffNode {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("HotStuffNode")
+                .field("parent", &self.parent)
+                .field("commands", &format!("<{} commands>", self.commands.len()))
+                .field("height", &self.height)
+                .field("justify_block", &self.justify.block)
+                .finish()
+        }
     }
 }
