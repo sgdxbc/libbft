@@ -25,9 +25,12 @@ pub struct HotStuffCoreConfig {
 pub trait HotStuffCoreContext {
     fn deliver(&mut self, node: HotStuffNode) -> impl Future<Output = ()>;
 
-    // broadcast `Generic` for `block`. the `Generic` will also loop back after `block` digest is
-    // computed and the message is signed
-    fn broadcast_generic(&mut self, node: HotStuffNode) -> impl Future<Output = ()>;
+    // broadcast `Generic` for `block`. the `Generic` will also loop back
+    // block digest is returned and the protocol blocks for it to ensure critical invariant
+    fn broadcast_generic(
+        &mut self,
+        node: HotStuffNode,
+    ) -> impl Future<Output = Option<BlockDigest>>;
 
     fn send_vote(
         &mut self,
@@ -218,20 +221,13 @@ impl<C: HotStuffCoreContext> HotStuffCore<C> {
             justify: self.highest_quorum_cert.clone(),
         };
         tracing::Span::current().record("height", node.height);
-        self.context.broadcast_generic(node).await;
+        if let Some(block) = self.context.broadcast_generic(node.clone()).await {
+            self.nodes.insert(block.clone(), node);
+            self.leaf_block = block;
+        }
     }
 
     async fn handle_generic(&mut self, block: BlockDigest, node: HotStuffNode) {
-        // TODO carefully reason about corner cases of very slow loopback generics
-        if self.is_leader() {
-            self.leaf_block = block.clone();
-        }
-
-        if self.nodes.contains_key(&block) {
-            assert!(!self.is_leader());
-            warn!(self.config.replica_index, "duplicate block {block:?}");
-            return;
-        }
         if !self.nodes.contains_key(&node.parent) {
             assert!(!self.is_leader());
             self.reorder_nodes
@@ -251,7 +247,15 @@ impl<C: HotStuffCoreContext> HotStuffCore<C> {
 
         let node_height = node.height;
         let justify_block = node.justify.block.clone();
-        self.nodes.insert(block.clone(), node);
+        if !self.is_leader() {
+            let replaced = self.nodes.insert(block.clone(), node);
+            if replaced.is_some() {
+                warn!(
+                    self.config.replica_index,
+                    "duplicate node for block {block:?}"
+                );
+            }
+        }
         if node_height > self.voted_height
             && (self.extends(&block, &self.locked_block)
                 || self.nodes[&justify_block].height > self.nodes[&self.locked_block].height)
@@ -358,17 +362,12 @@ async fn commit(
     context: &mut impl HotStuffCoreContext,
 ) {
     if nodes[executed_block].height < nodes[block].height {
-        Box::pin(commit(
-            &nodes[block].parent.clone(),
-            executed_block,
-            nodes,
-            context,
-        ))
-        .await;
+        let parent_block = nodes[block].parent.clone();
+        Box::pin(commit(&parent_block, executed_block, nodes, context)).await;
         // garbage collection is omitted in the original paper, here is a minimal implementation
         // that ensures long-term evaluation is feasible with limited memory
         // if the f slowest replicas miss any committed block, they will never be able to catch up
-        // context.deliver(nodes.remove(block).unwrap()).await;
+        nodes.remove(&parent_block);
         context.deliver(nodes[block].clone()).await;
     }
 }

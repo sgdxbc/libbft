@@ -1,7 +1,10 @@
 use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
 use bytes::Bytes;
-use tokio::{sync::mpsc::channel, time::interval};
+use tokio::{
+    sync::{mpsc::channel, oneshot},
+    time::interval,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, Span, warn};
 
@@ -13,6 +16,8 @@ mod workers;
 pub use core::{HotStuffCommand, HotStuffCoreConfig, HotStuffParams};
 
 pub mod events {
+    use tokio::sync::oneshot;
+
     use crate::{crypto::PartialSigBytes, event::Event};
 
     use super::core;
@@ -33,7 +38,7 @@ pub mod events {
     }
 
     pub enum SendMessageValue {
-        BroadcastGeneric(core::HotStuffNode),
+        BroadcastGeneric(core::HotStuffNode, oneshot::Sender<core::BlockDigest>),
         Vote(core::ReplicaIndex, core::BlockDigest, core::ReplicaIndex), // to, block, voter
     }
     pub struct SendMessage;
@@ -161,19 +166,21 @@ impl core::HotStuffCoreContext for HotStuffCoreContextState {
         }
     }
 
-    async fn broadcast_generic(&mut self, node: core::HotStuffNode) {
+    async fn broadcast_generic(&mut self, node: core::HotStuffNode) -> Option<core::BlockDigest> {
+        let (tx, rx) = oneshot::channel();
         if let Err(err) = self
             .send_message_tx
             .as_ref()
             .unwrap()
             .send((
-                events::SendMessageValue::BroadcastGeneric(node),
+                events::SendMessageValue::BroadcastGeneric(node, tx),
                 Span::current(),
             ))
             .await
         {
             warn!("Failed to send broadcast event: {err:#}");
         }
+        rx.await.ok()
     }
 
     async fn send_vote(
@@ -260,8 +267,11 @@ impl<C: workers::HotStuffCryptoContext> HotStuffEgressWorker<C> {
             token.run_until_cancelled(self.send_message_rx.recv()).await
         {
             match effect {
-                events::SendMessageValue::BroadcastGeneric(node) => {
+                events::SendMessageValue::BroadcastGeneric(node, tx) => {
                     let (bytes, block) = span.in_scope(|| self.state.egress_generic(&node));
+                    if tx.send(block.clone()).is_err() {
+                        warn!("Failed to send block digest back to core");
+                    }
                     let bytes = Bytes::from(bytes);
                     for (&replica_index, &addr) in &self.replica_addrs {
                         if let Err(err) = self
