@@ -1,0 +1,4 @@
+await-holding-invalid-types = [
+    { path = "tracing::span::Entered", reason = "generates incorrect spans when held across 'await' points" },
+    { path = "tracing::span::EnteredSpan", reason = "generates incorrect spans when held across 'await' points" },
+]
