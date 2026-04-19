@@ -24,7 +24,11 @@ impl<C> HotStuffWorker<C> {
 #[derive(Debug, BorshSerialize, BorshDeserialize)]
 enum HotStuffNetworkMessage {
     Generic, // node data piggybacked
-    Vote(BlockDigest, PartialSigBytes, ReplicaIndex),
+    Vote(
+        BlockDigest,
+        PartialSigBytes,
+        ReplicaIndex, // not covered by sig
+    ),
 }
 
 impl<C: HotStuffCryptoContext> HotStuffWorker<C> {

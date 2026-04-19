@@ -1,15 +1,11 @@
 use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
-use anyhow::Context as _;
-use bytes::{Buf, Bytes};
+use bytes::Bytes;
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
-use tracing::{Instrument, Span, instrument, warn};
+use tracing::{Instrument, Span, warn};
 
-use crate::{
-    crypto::SigBytes,
-    event::{Emit, EventChannel, EventSender, EventSenderSlot},
-};
+use crate::event::{Emit, EventChannel, EventSender, EventSenderSlot};
 
 mod core;
 #[cfg(test)]
@@ -230,29 +226,20 @@ impl<C: workers::PbftCryptoContext> PbftEgress<C> {
         {
             match message {
                 events::SendMessageValue::Broadcast(mut message) => {
-                    let (data_bytes, SigBytes(sig_bytes)) = self.state.egress(&mut message);
-                    let mut buf = vec![0x0];
-                    buf.extend_from_slice(&sig_bytes);
-                    buf.extend_from_slice(&data_bytes);
-                    let bytes = Bytes::from(buf);
-
+                    let (bytes, sig) = self.state.egress_broadcast(&mut message);
+                    let bytes = Bytes::from(bytes);
                     // why there's `Receiver::recv_many` but no `Sender::send_many`?
                     for &addr in self.replica_addrs.values() {
                         bytes_tx.send((addr, bytes.clone()), span.clone()).await;
                     }
                     loopback_tx
-                        .send(
-                            events::HandleMessageValue::Signed(message, SigBytes(sig_bytes)),
-                            span,
-                        )
+                        .send(events::HandleMessageValue::Signed(message, sig), span)
                         .await;
                 }
                 events::SendMessageValue::Sync(to, message) => {
-                    let data_bytes = borsh::to_vec(&message).unwrap();
-                    let mut buf = vec![0x1];
-                    buf.extend_from_slice(&data_bytes);
+                    let bytes = self.state.egress_sync(message);
                     bytes_tx
-                        .send((self.replica_addrs[&to], buf.into()), span)
+                        .send((self.replica_addrs[&to], bytes.into()), span)
                         .await;
                 }
             }
@@ -291,7 +278,7 @@ impl<C: workers::PbftCryptoContext> EventSenderSlot<events::HandleMessage> for P
 impl<C: workers::PbftCryptoContext> PbftIngress<C> {
     pub async fn run(&mut self, token: &CancellationToken) {
         while let Some(Some((bytes, span))) = token.run_until_cancelled(self.bytes.recv()).await {
-            match span.in_scope(|| self.decode(&bytes)) {
+            match span.in_scope(|| self.state.ingress(&bytes)) {
                 Ok(value) => {
                     self.signed_message_tx
                         .as_ref()
@@ -302,27 +289,5 @@ impl<C: workers::PbftCryptoContext> PbftIngress<C> {
                 Err(err) => warn!("Failed to decode and verify message: {err:#}"),
             }
         }
-    }
-
-    #[instrument(skip_all)]
-    fn decode(&self, mut bytes: &[u8]) -> anyhow::Result<events::HandleMessageValue> {
-        let value = match bytes.try_get_u8()? {
-            0x0 => {
-                let Some((sig_bytes, data_bytes)) = bytes.split_at_checked(C::SIG_BYTES_LEN) else {
-                    anyhow::bail!("Received bytes too short to contain signature");
-                };
-                let sig = SigBytes(sig_bytes.into());
-                let message = self.state.ingress(data_bytes, &sig)?;
-                events::HandleMessageValue::Signed(message, sig)
-            }
-            0x1 => {
-                let data_bytes = bytes;
-                let message =
-                    borsh::from_slice(data_bytes).context("Failed to deserialize sync message")?;
-                events::HandleMessageValue::Sync(message)
-            }
-            tag => anyhow::bail!("Invalid message: unknown tag {tag:#x}"),
-        };
-        Ok(value)
     }
 }
