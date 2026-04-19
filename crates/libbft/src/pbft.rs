@@ -180,7 +180,87 @@ impl core::PbftCoreContext for PbftCoreContextState {
     }
 }
 
-pub struct PbftIngressWorker<C: workers::PbftCryptoContext> {
+pub struct PbftEgress<C: workers::PbftCryptoContext> {
+    state: workers::PbftWorker<C>,
+    replica_addrs: HashMap<core::ReplicaIndex, SocketAddr>, // excluding self
+
+    message: EventChannel<events::SendMessage>,
+
+    bytes_tx: Option<EventSender<events::SendBytes>>, // network
+    loopback_tx: Option<EventSender<events::HandleMessage>>, // node
+}
+
+impl<C: workers::PbftCryptoContext> PbftEgress<C> {
+    pub fn new(
+        core_crypto_context: C,
+        params: core::PbftParams,
+        replica_addrs: HashMap<core::ReplicaIndex, SocketAddr>,
+    ) -> Self {
+        Self {
+            state: workers::PbftWorker::new(core_crypto_context, params),
+            replica_addrs,
+            message: EventChannel::new(None),
+            bytes_tx: None,
+            loopback_tx: None,
+        }
+    }
+
+    pub fn register(&mut self, mut emit_send_message: impl Emit<events::SendMessage>) {
+        emit_send_message.install(self.message.sender());
+    }
+}
+
+impl<C: workers::PbftCryptoContext> EventSenderSlot<events::SendBytes> for PbftEgress<C> {
+    fn sender_slot(&mut self) -> &mut Option<EventSender<events::SendBytes>> {
+        &mut self.bytes_tx
+    }
+}
+
+impl<C: workers::PbftCryptoContext> EventSenderSlot<events::HandleMessage> for PbftEgress<C> {
+    fn sender_slot(&mut self) -> &mut Option<EventSender<events::HandleMessage>> {
+        &mut self.loopback_tx
+    }
+}
+
+impl<C: workers::PbftCryptoContext> PbftEgress<C> {
+    pub async fn run(&mut self, token: &CancellationToken) {
+        let bytes_tx = self.bytes_tx.as_ref().unwrap();
+        let loopback_tx = self.loopback_tx.as_ref().unwrap();
+        while let Some(Some((message, span))) = token.run_until_cancelled(self.message.recv()).await
+        {
+            match message {
+                events::SendMessageValue::Broadcast(mut message) => {
+                    let (data_bytes, SigBytes(sig_bytes)) = self.state.egress(&mut message);
+                    let mut buf = vec![0x0];
+                    buf.extend_from_slice(&sig_bytes);
+                    buf.extend_from_slice(&data_bytes);
+                    let bytes = Bytes::from(buf);
+
+                    // why there's `Receiver::recv_many` but no `Sender::send_many`?
+                    for &addr in self.replica_addrs.values() {
+                        bytes_tx.send((addr, bytes.clone()), span.clone()).await;
+                    }
+                    loopback_tx
+                        .send(
+                            events::HandleMessageValue::Signed(message, SigBytes(sig_bytes)),
+                            span,
+                        )
+                        .await;
+                }
+                events::SendMessageValue::Sync(to, message) => {
+                    let data_bytes = borsh::to_vec(&message).unwrap();
+                    let mut buf = vec![0x1];
+                    buf.extend_from_slice(&data_bytes);
+                    bytes_tx
+                        .send((self.replica_addrs[&to], buf.into()), span)
+                        .await;
+                }
+            }
+        }
+    }
+}
+
+pub struct PbftIngress<C: workers::PbftCryptoContext> {
     state: workers::PbftWorker<C>,
 
     bytes: EventChannel<events::HandleBytes>,
@@ -188,7 +268,7 @@ pub struct PbftIngressWorker<C: workers::PbftCryptoContext> {
     signed_message_tx: Option<EventSender<events::HandleMessage>>, // node
 }
 
-impl<C: workers::PbftCryptoContext> PbftIngressWorker<C> {
+impl<C: workers::PbftCryptoContext> PbftIngress<C> {
     pub fn new(core_crypto_context: C, params: core::PbftParams) -> Self {
         Self {
             state: workers::PbftWorker::new(core_crypto_context, params),
@@ -202,15 +282,13 @@ impl<C: workers::PbftCryptoContext> PbftIngressWorker<C> {
     }
 }
 
-impl<C: workers::PbftCryptoContext> EventSenderSlot<events::HandleMessage>
-    for PbftIngressWorker<C>
-{
+impl<C: workers::PbftCryptoContext> EventSenderSlot<events::HandleMessage> for PbftIngress<C> {
     fn sender_slot(&mut self) -> &mut Option<EventSender<events::HandleMessage>> {
         &mut self.signed_message_tx
     }
 }
 
-impl<C: workers::PbftCryptoContext> PbftIngressWorker<C> {
+impl<C: workers::PbftCryptoContext> PbftIngress<C> {
     pub async fn run(&mut self, token: &CancellationToken) {
         while let Some(Some((bytes, span))) = token.run_until_cancelled(self.bytes.recv()).await {
             match span.in_scope(|| self.decode(&bytes)) {
@@ -246,85 +324,5 @@ impl<C: workers::PbftCryptoContext> PbftIngressWorker<C> {
             tag => anyhow::bail!("Invalid message: unknown tag {tag:#x}"),
         };
         Ok(value)
-    }
-}
-
-pub struct PbftEgressWorker<C: workers::PbftCryptoContext> {
-    state: workers::PbftWorker<C>,
-    replica_addrs: HashMap<core::ReplicaIndex, SocketAddr>, // excluding self
-
-    message: EventChannel<events::SendMessage>,
-
-    bytes_tx: Option<EventSender<events::SendBytes>>, // network
-    loopback_tx: Option<EventSender<events::HandleMessage>>, // node
-}
-
-impl<C: workers::PbftCryptoContext> PbftEgressWorker<C> {
-    pub fn new(
-        core_crypto_context: C,
-        params: core::PbftParams,
-        replica_addrs: HashMap<core::ReplicaIndex, SocketAddr>,
-    ) -> Self {
-        Self {
-            state: workers::PbftWorker::new(core_crypto_context, params),
-            replica_addrs,
-            message: EventChannel::new(None),
-            bytes_tx: None,
-            loopback_tx: None,
-        }
-    }
-
-    pub fn register(&mut self, mut emit_send_message: impl Emit<events::SendMessage>) {
-        emit_send_message.install(self.message.sender());
-    }
-}
-
-impl<C: workers::PbftCryptoContext> EventSenderSlot<events::SendBytes> for PbftEgressWorker<C> {
-    fn sender_slot(&mut self) -> &mut Option<EventSender<events::SendBytes>> {
-        &mut self.bytes_tx
-    }
-}
-
-impl<C: workers::PbftCryptoContext> EventSenderSlot<events::HandleMessage> for PbftEgressWorker<C> {
-    fn sender_slot(&mut self) -> &mut Option<EventSender<events::HandleMessage>> {
-        &mut self.loopback_tx
-    }
-}
-
-impl<C: workers::PbftCryptoContext> PbftEgressWorker<C> {
-    pub async fn run(&mut self, token: &CancellationToken) {
-        let bytes_tx = self.bytes_tx.as_ref().unwrap();
-        let loopback_tx = self.loopback_tx.as_ref().unwrap();
-        while let Some(Some((message, span))) = token.run_until_cancelled(self.message.recv()).await
-        {
-            match message {
-                events::SendMessageValue::Broadcast(mut message) => {
-                    let (data_bytes, SigBytes(sig_bytes)) = self.state.egress(&mut message);
-                    let mut buf = vec![0x0];
-                    buf.extend_from_slice(&sig_bytes);
-                    buf.extend_from_slice(&data_bytes);
-                    let bytes = Bytes::from(buf);
-
-                    // why there's `Receiver::recv_many` but no `Sender::send_many`?
-                    for &addr in self.replica_addrs.values() {
-                        bytes_tx.send((addr, bytes.clone()), span.clone()).await;
-                    }
-                    loopback_tx
-                        .send(
-                            events::HandleMessageValue::Signed(message, SigBytes(sig_bytes)),
-                            span,
-                        )
-                        .await;
-                }
-                events::SendMessageValue::Sync(to, message) => {
-                    let data_bytes = borsh::to_vec(&message).unwrap();
-                    let mut buf = vec![0x1];
-                    buf.extend_from_slice(&data_bytes);
-                    bytes_tx
-                        .send((self.replica_addrs[&to], buf.into()), span)
-                        .await;
-                }
-            }
-        }
     }
 }

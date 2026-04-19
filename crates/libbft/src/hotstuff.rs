@@ -192,7 +192,7 @@ impl core::HotStuffCoreContext for HotStuffCoreContextState {
     }
 }
 
-pub struct HotStuffEgressWorker<C> {
+pub struct HotStuffEgress<C> {
     state: workers::HotStuffWorker<C>,
     replica_addrs: HashMap<core::ReplicaIndex, SocketAddr>, // excluding self
 
@@ -202,7 +202,7 @@ pub struct HotStuffEgressWorker<C> {
     message_tx: Option<EventSender<events::HandleMessage>>,
 }
 
-impl<C> HotStuffEgressWorker<C> {
+impl<C> HotStuffEgress<C> {
     pub fn new(context: C, replica_addrs: HashMap<core::ReplicaIndex, SocketAddr>) -> Self {
         Self {
             state: workers::HotStuffWorker::new(context),
@@ -218,19 +218,19 @@ impl<C> HotStuffEgressWorker<C> {
     }
 }
 
-impl<C> EventSenderSlot<events::SendBytes> for HotStuffEgressWorker<C> {
+impl<C> EventSenderSlot<events::SendBytes> for HotStuffEgress<C> {
     fn sender_slot(&mut self) -> &mut Option<EventSender<events::SendBytes>> {
         &mut self.bytes_tx
     }
 }
 
-impl<C> EventSenderSlot<events::HandleMessage> for HotStuffEgressWorker<C> {
+impl<C> EventSenderSlot<events::HandleMessage> for HotStuffEgress<C> {
     fn sender_slot(&mut self) -> &mut Option<EventSender<events::HandleMessage>> {
         &mut self.message_tx
     }
 }
 
-impl<C: workers::HotStuffCryptoContext> HotStuffEgressWorker<C> {
+impl<C: workers::HotStuffCryptoContext> HotStuffEgress<C> {
     pub async fn run(&mut self, token: &CancellationToken) {
         let bytes_tx = self.bytes_tx.as_ref().unwrap();
         while let Some(Some((effect, span))) =
@@ -275,7 +275,7 @@ impl<C: workers::HotStuffCryptoContext> HotStuffEgressWorker<C> {
     }
 }
 
-pub struct HotStuffIngressWorker<C> {
+pub struct HotStuffIngress<C> {
     state: workers::HotStuffWorker<C>,
 
     bytes: EventChannel<crate::network::events::HandleBytes>,
@@ -283,7 +283,7 @@ pub struct HotStuffIngressWorker<C> {
     message_tx: Option<EventSender<events::HandleMessage>>,
 }
 
-impl<C> HotStuffIngressWorker<C> {
+impl<C> HotStuffIngress<C> {
     pub fn new(context: C) -> Self {
         Self {
             state: workers::HotStuffWorker::new(context),
@@ -297,13 +297,13 @@ impl<C> HotStuffIngressWorker<C> {
     }
 }
 
-impl<C> EventSenderSlot<events::HandleMessage> for HotStuffIngressWorker<C> {
+impl<C> EventSenderSlot<events::HandleMessage> for HotStuffIngress<C> {
     fn sender_slot(&mut self) -> &mut Option<EventSender<events::HandleMessage>> {
         &mut self.message_tx
     }
 }
 
-impl<C: workers::HotStuffCryptoContext> HotStuffIngressWorker<C> {
+impl<C: workers::HotStuffCryptoContext> HotStuffIngress<C> {
     pub async fn run(&mut self, token: &CancellationToken) {
         while let Some(Some((bytes, span))) = token.run_until_cancelled(self.bytes.recv()).await {
             match span.in_scope(|| self.state.ingress(bytes.as_ref())) {

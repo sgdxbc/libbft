@@ -5,7 +5,7 @@ use libbft::{
     crypto::{Digest, DummyCrypto},
     event::{AsEmit, Emit, EventChannel},
     pbft::{
-        PbftCoreConfig, PbftEgressWorker, PbftIngressWorker, PbftParams, PbftProtocol, PbftRequest,
+        PbftCoreConfig, PbftEgress, PbftIngress, PbftParams, PbftProtocol, PbftRequest,
         events::Deliver,
     },
     types::ReplicaIndex,
@@ -51,8 +51,8 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let mut protocol = PbftProtocol::new(config);
-    let mut ingress = PbftIngressWorker::new(DummyCrypto, params());
-    let mut egress = PbftEgressWorker::new(
+    let mut ingress = PbftIngress::new(DummyCrypto, params());
+    let mut egress = PbftEgress::new(
         DummyCrypto,
         params(),
         (0..params().num_replicas)

@@ -10,12 +10,12 @@ use libbft::{
     crypto::{Digest, DummyCrypto},
     event::{AsEmit, Emit, EventChannel, EventSender},
     hotstuff::{
-        self, HotStuffCommand, HotStuffCoreConfig, HotStuffEgressWorker, HotStuffIngressWorker,
+        self, HotStuffCommand, HotStuffCoreConfig, HotStuffEgress, HotStuffIngress,
         HotStuffParams, HotStuffProtocol, HotStuffQuorumCertWorker,
     },
     network,
     pbft::{
-        self, PbftCoreConfig, PbftEgressWorker, PbftIngressWorker, PbftParams, PbftProtocol,
+        self, PbftCoreConfig, PbftEgress, PbftIngress, PbftParams, PbftProtocol,
         PbftRequest,
         events::{Deliver, SendBytes},
     },
@@ -176,8 +176,8 @@ impl PbftNetwork {
             };
 
             let mut protocol = PbftProtocol::new(config);
-            let mut ingress = PbftIngressWorker::new(DummyCrypto, Self::params());
-            let mut egress = PbftEgressWorker::new(
+            let mut ingress = PbftIngress::new(DummyCrypto, Self::params());
+            let mut egress = PbftEgress::new(
                 DummyCrypto,
                 Self::params(),
                 (0..NUM_REPLICAS)
@@ -292,8 +292,8 @@ impl HotStuffNetwork {
             };
 
             let mut protocol = HotStuffProtocol::new(config);
-            let mut ingress = HotStuffIngressWorker::new(DummyCrypto);
-            let mut egress = HotStuffEgressWorker::new(
+            let mut ingress = HotStuffIngress::new(DummyCrypto);
+            let mut egress = HotStuffEgress::new(
                 DummyCrypto,
                 (0..NUM_REPLICAS)
                     .filter(|&index| index != i)
