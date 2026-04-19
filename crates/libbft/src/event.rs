@@ -1,11 +1,60 @@
 use std::any::type_name;
 
+use derive_where::derive_where;
+use metrics::Gauge;
+use tokio::sync::mpsc::{Receiver, Sender, channel};
+use tracing::warn;
+
 pub trait Event {
     type Value;
 }
 
-pub type EventSender<E> = tokio::sync::mpsc::Sender<(<E as Event>::Value, tracing::Span)>;
-pub type EventReceiver<E> = tokio::sync::mpsc::Receiver<(<E as Event>::Value, tracing::Span)>;
+#[derive_where(Clone)]
+pub struct EventSender<E: Event> {
+    tx: Sender<(E::Value, tracing::Span)>,
+    gauge: Option<Gauge>,
+}
+
+pub struct EventChannel<E: Event> {
+    pub tx: Sender<(E::Value, tracing::Span)>,
+    pub rx: Receiver<(E::Value, tracing::Span)>,
+    pub gauge: Option<Gauge>,
+}
+
+impl<E: Event> EventChannel<E> {
+    pub fn new(gauge: Option<Gauge>) -> Self {
+        let (tx, rx) = channel(1000);
+        Self { tx, rx, gauge }
+    }
+
+    pub fn sender(&self) -> EventSender<E> {
+        EventSender {
+            tx: self.tx.clone(),
+            gauge: self.gauge.clone(),
+        }
+    }
+
+    pub async fn recv(&mut self) -> Option<(E::Value, tracing::Span)> {
+        let event = self.rx.recv().await?;
+        if let Some(gauge) = &self.gauge {
+            gauge.decrement(1);
+        }
+        Some(event)
+    }
+}
+
+impl<E: Event> EventSender<E> {
+    pub async fn send(&self, value: E::Value, span: tracing::Span) -> bool {
+        if let Some(gauge) = &self.gauge {
+            gauge.increment(1);
+        }
+        if let Err(err) = self.tx.send((value, span)).await {
+            warn!("Failed to send event of type {}: {err:#}", type_name::<E>());
+            return false;
+        }
+        true
+    }
+}
 
 pub trait Emit<E: Event> {
     fn install(&mut self, tx: EventSender<E>);

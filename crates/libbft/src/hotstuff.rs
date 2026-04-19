@@ -1,14 +1,11 @@
 use std::{collections::HashMap, net::SocketAddr, time::Duration};
 
 use bytes::Bytes;
-use tokio::{
-    sync::{mpsc::channel, oneshot},
-    time::interval,
-};
+use tokio::{sync::oneshot, time::interval};
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument as _, Span, warn};
 
-use crate::event::{Emit, EventReceiver, EventSender, EventSenderSlot};
+use crate::event::{Emit, EventChannel, EventSender, EventSenderSlot};
 
 mod core;
 mod workers;
@@ -65,12 +62,9 @@ pub mod events {
 pub struct HotStuffProtocol {
     core: core::HotStuffCore<HotStuffCoreContextState>,
 
-    command_tx: EventSender<events::HandleCommand>,
-    command_rx: EventReceiver<events::HandleCommand>,
-    message_tx: EventSender<events::HandleMessage>,
-    message_rx: EventReceiver<events::HandleMessage>,
-    quorum_cert_tx: EventSender<events::HandleQuorumCert>,
-    quorum_cert_rx: EventReceiver<events::HandleQuorumCert>,
+    command: EventChannel<events::HandleCommand>,
+    message: EventChannel<events::HandleMessage>,
+    quorum_cert: EventChannel<events::HandleQuorumCert>,
 }
 
 struct HotStuffCoreContextState {
@@ -81,9 +75,6 @@ struct HotStuffCoreContextState {
 
 impl HotStuffProtocol {
     pub fn new(config: core::HotStuffCoreConfig) -> Self {
-        let (command_tx, command_rx) = channel(1000);
-        let (message_tx, message_rx) = channel(1000);
-        let (quorum_cert_tx, quorum_cert_rx) = channel(1000);
         let context = HotStuffCoreContextState {
             deliver_tx: None,
             send_message_tx: None,
@@ -91,12 +82,9 @@ impl HotStuffProtocol {
         };
         Self {
             core: core::HotStuffCore::new(context, config),
-            command_tx,
-            command_rx,
-            message_tx,
-            message_rx,
-            quorum_cert_tx,
-            quorum_cert_rx,
+            command: EventChannel::new(None),
+            message: EventChannel::new(None),
+            quorum_cert: EventChannel::new(None),
         }
     }
 
@@ -106,9 +94,9 @@ impl HotStuffProtocol {
         mut emit_message: impl Emit<events::HandleMessage>,
         mut emit_quorum_cert: impl Emit<events::HandleQuorumCert>,
     ) {
-        emit_command.install(self.command_tx.clone());
-        emit_message.install(self.message_tx.clone());
-        emit_quorum_cert.install(self.quorum_cert_tx.clone());
+        emit_command.install(self.command.sender());
+        emit_message.install(self.message.sender());
+        emit_quorum_cert.install(self.quorum_cert.sender());
     }
 }
 
@@ -136,13 +124,13 @@ impl HotStuffProtocol {
         loop {
             tokio::select! {
                 () = token.cancelled() => break,
-                Some((command, span)) = self.command_rx.recv() => {
+                Some((command, span)) = self.command.recv() => {
                     self.core.on_command(command).instrument(span).await;
                 }
-                Some((message, span)) = self.message_rx.recv() => {
+                Some((message, span)) = self.message.recv() => {
                     self.core.on_message(message).instrument(span).await;
                 }
-                Some((quorum_cert, span)) = self.quorum_cert_rx.recv() => {
+                Some((quorum_cert, span)) = self.quorum_cert.recv() => {
                     self.core.on_quorum_cert(quorum_cert).instrument(span).await;
                 }
                 now = interval.tick() => {
@@ -155,31 +143,23 @@ impl HotStuffProtocol {
 
 impl core::HotStuffCoreContext for HotStuffCoreContextState {
     async fn deliver(&mut self, node: core::HotStuffNode) {
-        if let Err(err) = self
-            .deliver_tx
+        self.deliver_tx
             .as_ref()
             .unwrap()
-            .send((node, Span::current()))
-            .await
-        {
-            warn!("Failed to send deliver event: {err:#}");
-        }
+            .send(node, Span::current())
+            .await;
     }
 
     async fn broadcast_generic(&mut self, node: core::HotStuffNode) -> Option<core::BlockDigest> {
         let (tx, rx) = oneshot::channel();
-        if let Err(err) = self
-            .send_message_tx
+        self.send_message_tx
             .as_ref()
             .unwrap()
-            .send((
+            .send(
                 events::SendMessageValue::BroadcastGeneric(node, tx),
                 Span::current(),
-            ))
-            .await
-        {
-            warn!("Failed to send broadcast event: {err:#}");
-        }
+            )
+            .await;
         rx.await.ok()
     }
 
@@ -189,18 +169,14 @@ impl core::HotStuffCoreContext for HotStuffCoreContextState {
         block: core::BlockDigest,
         replica_index: core::ReplicaIndex, // could be `to` for loopback voting
     ) {
-        if let Err(err) = self
-            .send_message_tx
+        self.send_message_tx
             .as_ref()
             .unwrap()
-            .send((
+            .send(
                 events::SendMessageValue::Vote(to, block, replica_index),
                 Span::current(),
-            ))
-            .await
-        {
-            warn!("Failed to send vote event: {err:#}");
-        }
+            )
+            .await;
     }
 
     async fn make_quorum_cert(
@@ -208,15 +184,11 @@ impl core::HotStuffCoreContext for HotStuffCoreContextState {
         block: core::BlockDigest,
         sigs: impl IntoIterator<Item = (core::ReplicaIndex, crate::crypto::PartialSigBytes)>,
     ) {
-        if let Err(err) = self
-            .make_quorum_cert_tx
+        self.make_quorum_cert_tx
             .as_ref()
             .unwrap()
-            .send(((block, sigs.into_iter().collect()), Span::current()))
-            .await
-        {
-            warn!("Failed to send make quorum cert event: {err:#}");
-        }
+            .send((block, sigs.into_iter().collect()), Span::current())
+            .await;
     }
 }
 
@@ -224,8 +196,7 @@ pub struct HotStuffEgressWorker<C> {
     state: workers::HotStuffWorker<C>,
     replica_addrs: HashMap<core::ReplicaIndex, SocketAddr>, // excluding self
 
-    send_message_tx: EventSender<events::SendMessage>,
-    send_message_rx: EventReceiver<events::SendMessage>,
+    send_message: EventChannel<events::SendMessage>,
 
     bytes_tx: Option<EventSender<events::SendBytes>>,
     message_tx: Option<EventSender<events::HandleMessage>>,
@@ -233,19 +204,17 @@ pub struct HotStuffEgressWorker<C> {
 
 impl<C> HotStuffEgressWorker<C> {
     pub fn new(context: C, replica_addrs: HashMap<core::ReplicaIndex, SocketAddr>) -> Self {
-        let (send_message_tx, send_message_rx) = channel(1000);
         Self {
             state: workers::HotStuffWorker::new(context),
             replica_addrs,
-            send_message_tx,
-            send_message_rx,
+            send_message: EventChannel::new(None),
             bytes_tx: None,
             message_tx: None,
         }
     }
 
     pub fn register(&mut self, mut emit_effect: impl Emit<events::SendMessage>) {
-        emit_effect.install(self.send_message_tx.clone());
+        emit_effect.install(self.send_message.sender());
     }
 }
 
@@ -263,8 +232,9 @@ impl<C> EventSenderSlot<events::HandleMessage> for HotStuffEgressWorker<C> {
 
 impl<C: workers::HotStuffCryptoContext> HotStuffEgressWorker<C> {
     pub async fn run(&mut self, token: &CancellationToken) {
+        let bytes_tx = self.bytes_tx.as_ref().unwrap();
         while let Some(Some((effect, span))) =
-            token.run_until_cancelled(self.send_message_rx.recv()).await
+            token.run_until_cancelled(self.send_message.recv()).await
         {
             match effect {
                 events::SendMessageValue::BroadcastGeneric(node, tx) => {
@@ -273,53 +243,31 @@ impl<C: workers::HotStuffCryptoContext> HotStuffEgressWorker<C> {
                         warn!("Failed to send block digest back to core");
                     }
                     let bytes = Bytes::from(bytes);
-                    for (&replica_index, &addr) in &self.replica_addrs {
-                        if let Err(err) = self
-                            .bytes_tx
-                            .as_ref()
-                            .unwrap()
-                            .send(((addr, bytes.clone()), span.clone()))
-                            .await
-                        {
-                            warn!("Failed to broadcast to replica {replica_index}: {err:#}");
-                        }
+                    for &addr in self.replica_addrs.values() {
+                        bytes_tx.send((addr, bytes.clone()), span.clone()).await;
                     }
-                    if let Err(err) = self
-                        .message_tx
+                    self.message_tx
                         .as_ref()
                         .unwrap()
-                        .send((core::HotStuffMessage::Generic(block, node), span))
-                        .await
-                    {
-                        warn!("Failed to send loopback generic message: {err:#}");
-                    }
+                        .send(core::HotStuffMessage::Generic(block, node), span)
+                        .await;
                 }
                 events::SendMessageValue::Vote(to, block, replica_index) => {
                     if to == replica_index {
                         let partial_sig = self.state.sign_vote(&block);
-                        if let Err(err) = self
-                            .message_tx
+                        self.message_tx
                             .as_ref()
                             .unwrap()
-                            .send((
+                            .send(
                                 core::HotStuffMessage::Vote(block, replica_index, partial_sig),
                                 span,
-                            ))
-                            .await
-                        {
-                            warn!("Failed to send loopback vote message: {err:#}");
-                        }
+                            )
+                            .await;
                     } else {
                         let bytes = span.in_scope(|| self.state.egress_vote(block, replica_index));
-                        if let Err(err) = self
-                            .bytes_tx
-                            .as_ref()
-                            .unwrap()
-                            .send(((self.replica_addrs[&to], bytes.into()), span))
-                            .await
-                        {
-                            warn!("Failed to send vote to replica {to}: {err:#}");
-                        }
+                        bytes_tx
+                            .send((self.replica_addrs[&to], bytes.into()), span)
+                            .await;
                     }
                 }
             }
@@ -330,25 +278,22 @@ impl<C: workers::HotStuffCryptoContext> HotStuffEgressWorker<C> {
 pub struct HotStuffIngressWorker<C> {
     state: workers::HotStuffWorker<C>,
 
-    bytes_tx: EventSender<crate::network::events::HandleBytes>,
-    bytes_rx: EventReceiver<crate::network::events::HandleBytes>,
+    bytes: EventChannel<crate::network::events::HandleBytes>,
 
     message_tx: Option<EventSender<events::HandleMessage>>,
 }
 
 impl<C> HotStuffIngressWorker<C> {
     pub fn new(context: C) -> Self {
-        let (bytes_tx, bytes_rx) = channel(1000);
         Self {
             state: workers::HotStuffWorker::new(context),
-            bytes_tx,
-            bytes_rx,
+            bytes: EventChannel::new(None),
             message_tx: None,
         }
     }
 
     pub fn register(&mut self, mut emit_bytes: impl Emit<crate::network::events::HandleBytes>) {
-        emit_bytes.install(self.bytes_tx.clone());
+        emit_bytes.install(self.bytes.sender());
     }
 }
 
@@ -360,23 +305,12 @@ impl<C> EventSenderSlot<events::HandleMessage> for HotStuffIngressWorker<C> {
 
 impl<C: workers::HotStuffCryptoContext> HotStuffIngressWorker<C> {
     pub async fn run(&mut self, token: &CancellationToken) {
-        while let Some(Some((bytes, span))) = token.run_until_cancelled(self.bytes_rx.recv()).await
-        {
+        while let Some(Some((bytes, span))) = token.run_until_cancelled(self.bytes.recv()).await {
             match span.in_scope(|| self.state.ingress(bytes.as_ref())) {
                 Ok(message) => {
-                    if let Err(err) = self
-                        .message_tx
-                        .as_ref()
-                        .unwrap()
-                        .send((message, span))
-                        .await
-                    {
-                        warn!("Failed to send message: {err:#}");
-                    }
+                    self.message_tx.as_ref().unwrap().send(message, span).await;
                 }
-                Err(err) => {
-                    warn!("Failed to parse message: {err:#}")
-                }
+                Err(err) => warn!("Failed to parse message: {err:#}"),
             }
         }
     }
@@ -385,25 +319,22 @@ impl<C: workers::HotStuffCryptoContext> HotStuffIngressWorker<C> {
 pub struct HotStuffQuorumCertWorker<C> {
     context: C,
 
-    make_quorum_cert_tx: EventSender<events::MakeQuorumCert>,
-    make_quorum_cert_rx: EventReceiver<events::MakeQuorumCert>,
+    make_quorum_cert: EventChannel<events::MakeQuorumCert>,
 
     quorum_cert_tx: Option<EventSender<events::HandleQuorumCert>>,
 }
 
 impl<C> HotStuffQuorumCertWorker<C> {
     pub fn new(context: C) -> Self {
-        let (make_quorum_cert_tx, make_quorum_cert_rx) = channel(1000);
         Self {
             context,
-            make_quorum_cert_tx,
-            make_quorum_cert_rx,
+            make_quorum_cert: EventChannel::new(None),
             quorum_cert_tx: None,
         }
     }
 
     pub fn register(&mut self, mut emit_make_quorum_cert: impl Emit<events::MakeQuorumCert>) {
-        emit_make_quorum_cert.install(self.make_quorum_cert_tx.clone());
+        emit_make_quorum_cert.install(self.make_quorum_cert.sender());
     }
 }
 
@@ -416,7 +347,7 @@ impl<C> EventSenderSlot<events::HandleQuorumCert> for HotStuffQuorumCertWorker<C
 impl<C: workers::HotStuffCryptoContext> HotStuffQuorumCertWorker<C> {
     pub async fn run(&mut self, token: &CancellationToken) {
         while let Some(Some(((block, sigs), span))) = token
-            .run_until_cancelled(self.make_quorum_cert_rx.recv())
+            .run_until_cancelled(self.make_quorum_cert.recv())
             .await
         {
             let sig = match self.context.combine(sigs) {
@@ -427,15 +358,11 @@ impl<C: workers::HotStuffCryptoContext> HotStuffQuorumCertWorker<C> {
                 }
             };
             let quorum_cert = core::QuorumCert { block, sig };
-            if let Err(err) = self
-                .quorum_cert_tx
+            self.quorum_cert_tx
                 .as_ref()
                 .unwrap()
-                .send((quorum_cert, span))
-                .await
-            {
-                warn!("Failed to send quorum cert: {err:#}");
-            }
+                .send(quorum_cert, span)
+                .await;
         }
     }
 }

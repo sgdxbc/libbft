@@ -20,10 +20,10 @@ pub fn init_telemetry() -> TelemetryGuard {
 
 impl Drop for TelemetryGuard {
     fn drop(&mut self) {
-        if let Some(tracer_provider) = self.0.take() {
-            if let Err(err) = tracer_provider.shutdown() {
-                eprintln!("Error shutting down tracer provider: {err:#}");
-            }
+        if let Some(tracer_provider) = self.0.take()
+            && let Err(err) = tracer_provider.shutdown()
+        {
+            eprintln!("Error shutting down tracer provider: {err:#}");
         }
     }
 }

@@ -2,11 +2,10 @@ use std::{collections::HashMap, net::SocketAddr};
 
 use bytes::Buf;
 use futures_util::{SinkExt, StreamExt, future::OptionFuture};
-use libbft::event::{AsEmit, Emit, EventReceiver, EventSender, EventSenderSlot};
+use libbft::event::{AsEmit, Emit, EventChannel, EventSender, EventSenderSlot};
 use tokio::{
     net::{TcpListener, TcpStream},
     select,
-    sync::mpsc::channel,
     task::JoinSet,
     try_join,
 };
@@ -36,26 +35,24 @@ pub struct PeerNetwork {
     connection_workers: JoinSet<(SocketAddr, anyhow::Result<()>)>,
     connection_tx_map: HashMap<SocketAddr, EventSender<events::SendConnectionBytes>>,
 
-    send_bytes_tx: EventSender<events::SendBytes>,
-    send_bytes_rx: EventReceiver<events::SendBytes>,
+    send_bytes: EventChannel<events::SendBytes>,
+
     handle_bytes_tx: Option<EventSender<events::HandleBytes>>,
 }
 
 impl PeerNetwork {
     pub fn new(listener: impl Into<Option<TcpListener>>) -> Self {
-        let (send_bytes_tx, send_bytes_rx) = channel(1000);
         Self {
             listener: listener.into(),
             connection_workers: JoinSet::new(),
             connection_tx_map: HashMap::new(),
-            send_bytes_tx,
-            send_bytes_rx,
+            send_bytes: EventChannel::new(None),
             handle_bytes_tx: None,
         }
     }
 
     pub fn register(&self, mut emit_send_bytes: impl Emit<events::SendBytes>) {
-        emit_send_bytes.install(self.send_bytes_tx.clone());
+        emit_send_bytes.install(self.send_bytes.sender());
     }
 }
 
@@ -105,7 +102,7 @@ impl PeerNetwork {
         {
             let replaced = self
                 .connection_tx_map
-                .insert(remote_addr, worker.send_bytes_tx.clone());
+                .insert(remote_addr, worker.send_bytes.sender());
             if replaced.is_some() {
                 warn!(
                     "Simultaneous connection attempt with peer {remote_addr}: replaced existing connection"
@@ -132,7 +129,7 @@ impl PeerNetwork {
                 Some(accept) = OptionFuture::from(self.listener.as_mut().map(|l| l.accept())) => {
                     Select::Accept(accept?)
                 }
-                Some((remote_addr, bytes)) = self.send_bytes_rx.recv() => {
+                Some((remote_addr, bytes)) = self.send_bytes.recv() => {
                     Select::SendBytes((remote_addr, bytes))
                 }
                 Some(res) = self.connection_workers.join_next() => Select::Worker(res.unwrap()),
@@ -144,12 +141,7 @@ impl PeerNetwork {
                     if !self.connection_tx_map.contains_key(&remote_addr) {
                         self.connect(remote_addr);
                     }
-                    if let Err(err) = self.connection_tx_map[&remote_addr]
-                        .send((bytes, span))
-                        .await
-                    {
-                        warn!("Failed to send bytes to peer {remote_addr}: {err:#}");
-                    }
+                    self.connection_tx_map[&remote_addr].send(bytes, span).await;
                 }
                 Select::Worker((remote_addr, res)) => {
                     if let Err(err) = res {
@@ -177,18 +169,16 @@ enum Remote {
 pub struct ConnectionWorker {
     remote: Remote,
 
-    send_bytes_tx: EventSender<events::SendConnectionBytes>,
-    send_bytes_rx: EventReceiver<events::SendConnectionBytes>,
+    send_bytes: EventChannel<events::SendConnectionBytes>,
+
     handle_bytes_tx: Option<EventSender<events::HandleBytes>>,
 }
 
 impl ConnectionWorker {
     fn new(remote: Remote) -> Self {
-        let (send_bytes_tx, send_bytes_rx) = channel(1000);
         Self {
             remote,
-            send_bytes_tx,
-            send_bytes_rx,
+            send_bytes: EventChannel::new(None),
             handle_bytes_tx: None,
         }
     }
@@ -209,7 +199,7 @@ impl ConnectionWorker {
         stream.set_nodelay(true)?; // spellchecker:disable-line
 
         let handle_bytes_tx = self.handle_bytes_tx.unwrap();
-        drop(self.send_bytes_tx);
+        drop(self.send_bytes.tx);
         let (mut write, mut read) = LengthDelimitedCodec::new().framed(stream).split();
         let ingress = async {
             while let Some(mut bytes) = read.next().await.transpose()? {
@@ -224,14 +214,15 @@ impl ConnectionWorker {
                 let span = info_span!("PeerNetwork receive bytes");
                 span.set_parent(context)?;
 
-                if let Err(err) = handle_bytes_tx.send((bytes.into(), span)).await {
-                    warn!("Failed to send received bytes to handler: {err:#}");
-                }
+                handle_bytes_tx.send(bytes.into(), span).await;
             }
             anyhow::Ok(())
         };
         let egress = async {
-            while let Some((bytes, span)) = self.send_bytes_rx.recv().await {
+            while let Some((bytes, span)) = self.send_bytes.rx.recv().await {
+                if let Some(gauge) = &self.send_bytes.gauge {
+                    gauge.decrement(1);
+                }
                 let context = span.context();
                 let mut carrier = HashMap::new();
                 opentelemetry::global::get_text_map_propagator(|propagator| {

@@ -1,9 +1,9 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Instant};
 
 use anyhow::Context;
 use libbft::{
     crypto::{Digest, DummyCrypto},
-    event::{AsEmit, Emit},
+    event::{AsEmit, Emit, EventChannel},
     pbft::{
         PbftCoreConfig, PbftEgressWorker, PbftIngressWorker, PbftParams, PbftProtocol, PbftRequest,
         events::Deliver,
@@ -12,7 +12,8 @@ use libbft::{
 };
 use libbft_apps::{init_metrics_exporter, init_telemetry};
 use libbft_network::peer::PeerNetwork;
-use tokio::{net::TcpListener, signal::ctrl_c, sync::mpsc::channel, task::JoinSet};
+use metrics::histogram;
+use tokio::{net::TcpListener, signal::ctrl_c, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, info_span};
 
@@ -38,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut request_tx = None;
     let mut snapshot_tx = None;
-    let (deliver_tx, mut deliver_rx) = channel(1000);
+    let mut deliver = EventChannel::new(None);
 
     let token = CancellationToken::new();
     let mut join_set = JoinSet::new();
@@ -75,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
         AsEmit(&mut ingress).and(AsEmit(&mut egress)),
         AsEmit(&mut snapshot_tx),
     );
-    Emit::<Deliver>::install(&mut AsEmit(&mut protocol), deliver_tx);
+    Emit::<Deliver>::install(&mut AsEmit(&mut protocol), deliver.sender());
     ingress.register(AsEmit(&mut network));
     egress.register(AsEmit(&mut protocol));
     network.register(AsEmit(&mut egress));
@@ -99,29 +100,28 @@ async fn main() -> anyhow::Result<()> {
 
     let snapshot_tx = snapshot_tx.unwrap();
     let workload = async move {
-        let mut count = 0;
+        let mut count = 0u64;
         let rounds = async {
             loop {
+                let start = Instant::now();
                 let span = info_span!("Workload", round = count);
                 if let Some(request_tx) = &request_tx {
-                    request_tx
-                        .send((PbftRequest(b"hello".into()), span))
-                        .await
-                        .context("request")?;
+                    let sent = request_tx.send(PbftRequest(b"hello".into()), span).await;
+                    anyhow::ensure!(sent, "Failed to send request");
                 }
-                deliver_rx
+                deliver
                     .recv()
                     .await
                     .with_context(|| format!("Node {index} deliver round {count}"))?;
                 count += 1;
-                if count % 100 == 0 {
+                histogram!("deliver_latency").record(start.elapsed().as_secs_f64());
+                if count.is_multiple_of(100) {
                     snapshot_tx
-                        .send((
-                            (count, Digest([0u8; 32].into())),
+                        .send(
+                            (count, Digest(count.to_be_bytes().into())),
                             info_span!("TriggerSnapshot", round = count),
-                        ))
-                        .await
-                        .context("Failed to trigger snapshot")?;
+                        )
+                        .await;
                 }
             }
             #[allow(unreachable_code)]

@@ -8,7 +8,7 @@ use std::{
 use anyhow::Context;
 use libbft::{
     crypto::{Digest, DummyCrypto},
-    event::{AsEmit, Emit, EventReceiver, EventSender},
+    event::{AsEmit, Emit, EventChannel, EventSender},
     hotstuff::{
         self, HotStuffCommand, HotStuffCoreConfig, HotStuffEgressWorker, HotStuffIngressWorker,
         HotStuffParams, HotStuffProtocol, HotStuffQuorumCertWorker,
@@ -23,7 +23,7 @@ use libbft::{
 };
 use libbft_apps::{init_metrics_exporter, init_telemetry};
 use metrics::histogram;
-use tokio::{signal::ctrl_c, sync::mpsc::channel, task::JoinSet, time::sleep};
+use tokio::{signal::ctrl_c, task::JoinSet, time::sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::info_span;
 
@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
     let _telemetry = init_telemetry();
     init_metrics_exporter(None)?;
 
-    let (fabric_bytes_tx, mut fabric_bytes_rx) = channel(1000);
+    let mut fabric_bytes = EventChannel::new(None);
     let mut node_bytes_tx_map = HashMap::new();
 
     let token = CancellationToken::new();
@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
             network.spawn_workers(
                 &mut join_set,
                 &mut node_bytes_tx_map,
-                fabric_bytes_tx,
+                fabric_bytes.sender(),
                 &token,
             );
             Network::Pbft(network)
@@ -65,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
             network.spawn_workers(
                 &mut join_set,
                 &mut node_bytes_tx_map,
-                fabric_bytes_tx,
+                fabric_bytes.sender(),
                 &token,
             );
             Network::HotStuff(network)
@@ -74,19 +74,16 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let fabric = async move {
-        while let Some(((receiver_addr, bytes), span)) = fabric_bytes_rx.recv().await {
+        while let Some(((receiver_addr, bytes), span)) = fabric_bytes.recv().await {
             node_bytes_tx_map[&receiver_addr]
-                .send((bytes.into(), span))
-                .await?;
+                .send(bytes.into(), span)
+                .await;
         }
-        anyhow::Ok(())
     };
     join_set.spawn({
         let token = token.clone();
         async move {
-            if let Some(Err(err)) = token.run_until_cancelled(fabric).await {
-                tracing::error!("Fabric error: {err:#}");
-            }
+            token.run_until_cancelled(fabric).await;
         }
     });
 
@@ -146,7 +143,7 @@ fn replica_addr(index: ReplicaIndex) -> SocketAddr {
 #[derive(Default)]
 struct PbftNetwork {
     request_tx: Option<EventSender<pbft::events::HandleRequest>>,
-    deliver_rx_vec: Vec<EventReceiver<pbft::events::Deliver>>,
+    deliver_vec: Vec<EventChannel<pbft::events::Deliver>>,
     snapshot_tx_vec: Vec<EventSender<pbft::events::Snapshot>>,
     count: u64,
 }
@@ -207,9 +204,9 @@ impl PbftNetwork {
             node_bytes_tx_map.insert(replica_addr(i as _), node_bytes_tx);
             egress.register(AsEmit(&mut protocol));
 
-            let (deliver_tx, deliver_rx) = channel(1000);
-            Emit::<Deliver>::install(&mut AsEmit(&mut protocol), deliver_tx);
-            self.deliver_rx_vec.push(deliver_rx);
+            let deliver = EventChannel::new(None);
+            Emit::<Deliver>::install(&mut AsEmit(&mut protocol), deliver.sender());
+            self.deliver_vec.push(deliver);
             Emit::<SendBytes>::install(&mut AsEmit(&mut egress), fabric_bytes_tx.clone());
 
             join_set.spawn({
@@ -231,13 +228,14 @@ impl PbftNetwork {
         loop {
             let round_start = Instant::now();
             let span = info_span!("Workload", round = self.count);
-            self.request_tx
+            let sent = self
+                .request_tx
                 .as_ref()
                 .unwrap()
-                .send((PbftRequest(b"hello".into()), span))
-                .await
-                .context("request")?;
-            for (i, deliver_rx) in self.deliver_rx_vec.iter_mut().enumerate() {
+                .send(PbftRequest(b"hello".into()), span)
+                .await;
+            anyhow::ensure!(sent, "Failed to send request");
+            for (i, deliver_rx) in self.deliver_vec.iter_mut().enumerate() {
                 deliver_rx
                     .recv()
                     .await
@@ -248,12 +246,11 @@ impl PbftNetwork {
             if self.count.is_multiple_of(100) {
                 for snapshot_tx in &self.snapshot_tx_vec {
                     snapshot_tx
-                        .send((
-                            (self.count, Digest([0u8; 32].into())),
+                        .send(
+                            (self.count, Digest(self.count.to_be_bytes().into())),
                             info_span!("TriggerSnapshot", round = self.count),
-                        ))
-                        .await
-                        .context("Failed to trigger snapshot")?;
+                        )
+                        .await;
                 }
             }
             histogram!("deliver_latency").record(round_start.elapsed().as_secs_f64());
@@ -264,7 +261,7 @@ impl PbftNetwork {
 #[derive(Default)]
 struct HotStuffNetwork {
     command_tx_vec: Vec<EventSender<hotstuff::events::HandleCommand>>,
-    deliver_rx_vec: Vec<EventReceiver<hotstuff::events::Deliver>>,
+    deliver_vec: Vec<EventChannel<hotstuff::events::Deliver>>,
     count: u64,
 }
 
@@ -319,9 +316,12 @@ impl HotStuffNetwork {
             egress.register(AsEmit(&mut protocol));
             quorum_cert.register(AsEmit(&mut protocol));
 
-            let (deliver_tx, deliver_rx) = channel(1000);
-            Emit::<hotstuff::events::Deliver>::install(&mut AsEmit(&mut protocol), deliver_tx);
-            self.deliver_rx_vec.push(deliver_rx);
+            let deliver = EventChannel::new(None);
+            Emit::<hotstuff::events::Deliver>::install(
+                &mut AsEmit(&mut protocol),
+                deliver.sender(),
+            );
+            self.deliver_vec.push(deliver);
             Emit::<hotstuff::events::SendBytes>::install(
                 &mut AsEmit(&mut egress),
                 fabric_bytes_tx.clone(),
@@ -351,17 +351,18 @@ impl HotStuffNetwork {
             let round_start = Instant::now();
             let span = info_span!("Workload", round = self.count);
             for command_tx in &self.command_tx_vec {
-                command_tx
-                    .send((
+                let sent = command_tx
+                    .send(
                         HotStuffCommand(self.count.to_be_bytes().into()),
                         span.clone(),
-                    ))
-                    .await
-                    .context("Submit command failed")?;
+                    )
+                    .await;
+                anyhow::ensure!(sent, "Failed to send command");
             }
-            for (i, deliver_rx) in self.deliver_rx_vec.iter_mut().enumerate() {
+            for (i, deliver) in self.deliver_vec.iter_mut().enumerate() {
                 while {
-                    let (block, _) = deliver_rx
+                    let (block, _) = deliver
+                        .rx
                         .recv()
                         .await
                         .with_context(|| format!("Node {i} deliver round {}", self.count))?;
