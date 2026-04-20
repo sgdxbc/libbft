@@ -1,5 +1,5 @@
 <div align="center">
-<img src="./docs/logo.svg" width=128>
+<img src="./docs/logo.svg" width=160>
 
 # $`\mathtt{lib}\beta\phi\tau`$
 
