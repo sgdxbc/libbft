@@ -616,7 +616,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "libbft",
- "libbft-network",
+ "libbft-tcp",
  "metrics",
  "metrics-exporter-prometheus",
  "opentelemetry",
@@ -640,7 +640,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "libbft-network"
+name = "libbft-tcp"
 version = "0.1.0"
 dependencies = [
  "anyhow",

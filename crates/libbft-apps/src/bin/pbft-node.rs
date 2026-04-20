@@ -11,7 +11,7 @@ use libbft::{
     types::ReplicaIndex,
 };
 use libbft_apps::{init_metrics_exporter, init_telemetry};
-use libbft_network::peer::PeerNetwork;
+use libbft_tcp::peer::PeerNetwork;
 use metrics::histogram;
 use tokio::{net::TcpListener, signal::ctrl_c, task::JoinSet};
 use tokio_util::sync::CancellationToken;

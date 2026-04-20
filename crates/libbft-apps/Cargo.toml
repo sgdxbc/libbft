@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.102"
 libbft = { version = "0.1.0", path = "../libbft" }
-libbft-network = { version = "0.1.0", path = "../libbft-network" }
+libbft-tcp = { version = "0.1.0", path = "../libbft-tcp" }
 metrics = "0.24.3"
 metrics-exporter-prometheus = { version = "0.18.1", default-features = false, features = ["http-listener"] }
 opentelemetry = "0.31.0"
