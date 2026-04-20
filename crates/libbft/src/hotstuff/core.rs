@@ -8,8 +8,8 @@ use tracing::{debug, info, instrument, warn};
 pub type ReplicaIndex = crate::types::ReplicaIndex;
 pub type BlockDigest = crate::crypto::Digest; // we will call this `block`
 type Height = u64;
-type PartialSigBytes = crate::crypto::PartialSigBytes;
-type SigBytes = crate::crypto::SigBytes;
+pub type PartialSig = crate::crypto::PartialSigBytes;
+type Sig = crate::crypto::SigBytes;
 
 pub struct HotStuffParams {
     pub num_replicas: usize,
@@ -47,7 +47,7 @@ pub trait HotStuffCoreContext {
     fn make_quorum_cert(
         &mut self,
         block: BlockDigest,
-        sigs: impl IntoIterator<Item = (ReplicaIndex, PartialSigBytes)>,
+        partial_sigs: impl IntoIterator<Item = (ReplicaIndex, PartialSig)>,
     ) -> impl Future<Output = ()>;
 }
 
@@ -57,7 +57,7 @@ pub struct HotStuffCommand(pub Vec<u8>);
 #[derive(Debug, BorshSerialize, BorshDeserialize)]
 pub enum HotStuffMessage {
     Generic(BlockDigest, HotStuffNode),
-    Vote(BlockDigest, ReplicaIndex, PartialSigBytes),
+    Vote(BlockDigest, ReplicaIndex, PartialSig),
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone)]
@@ -71,7 +71,7 @@ pub struct HotStuffNode {
 #[derive(Debug, BorshSerialize, BorshDeserialize, Clone)]
 pub struct QuorumCert {
     pub block: BlockDigest,
-    pub sig: SigBytes,
+    pub sig: Sig,
 }
 
 pub struct HotStuffCore<C> {
@@ -80,7 +80,7 @@ pub struct HotStuffCore<C> {
 
     // simulated block storage. consider generalize to context interfaces if necessary
     nodes: HashMap<BlockDigest, HotStuffNode>,
-    votes: HashMap<BlockDigest, HashMap<ReplicaIndex, PartialSigBytes>>,
+    votes: HashMap<BlockDigest, HashMap<ReplicaIndex, PartialSig>>,
     voted_height: Height,
     locked_block: BlockDigest,
     executed_block: BlockDigest,
@@ -289,7 +289,7 @@ impl<C: HotStuffCoreContext> HotStuffCore<C> {
         &mut self,
         block: BlockDigest,
         replica_index: ReplicaIndex,
-        partial_sig: PartialSigBytes,
+        partial_sig: PartialSig,
     ) {
         if !self.nodes.contains_key(&block) {
             // suppress false positive by garbage collected blocks

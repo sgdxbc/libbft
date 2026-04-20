@@ -15,7 +15,9 @@ mod workers;
 pub use core::{PbftCoreConfig, PbftParams, PbftRequest};
 
 pub mod events {
-    use crate::{crypto::SigBytes, event::Event, pbft::core};
+    use crate::event::Event;
+
+    use super::core;
 
     pub struct HandleRequest;
     impl Event for HandleRequest {
@@ -23,7 +25,7 @@ pub mod events {
     }
 
     pub enum HandleMessageValue {
-        Signed(core::PbftMessage, SigBytes),
+        Signed(core::PbftMessage, core::Sig),
         Sync(core::PbftSyncMessage),
     }
 

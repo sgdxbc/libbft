@@ -9,7 +9,7 @@ pub type ReplicaIndex = crate::types::ReplicaIndex;
 pub type ViewNum = u64;
 pub type SeqNum = u64;
 pub type Digest = crate::crypto::Digest;
-type SigBytes = crate::crypto::SigBytes;
+pub type Sig = crate::crypto::SigBytes;
 
 pub struct PbftParams {
     pub num_replicas: usize,
@@ -123,9 +123,9 @@ pub struct PbftCore<C> {
     // invariant: every proof except the first one (i.e. with smallest seq num) is not stable
     checkpoint_proofs: BTreeMap<SeqNum, CheckpointProof>,
 
-    reorder_prepares: HashMap<SeqNum, Vec<(Prepare, SigBytes)>>,
-    reorder_commits: HashMap<SeqNum, Vec<(Commit, SigBytes)>>,
-    reorder_checkpoints: BTreeMap<SeqNum, Vec<(Checkpoint, SigBytes)>>,
+    reorder_prepares: HashMap<SeqNum, Vec<(Prepare, Sig)>>,
+    reorder_commits: HashMap<SeqNum, Vec<(Commit, Sig)>>,
+    reorder_checkpoints: BTreeMap<SeqNum, Vec<(Checkpoint, Sig)>>,
     // TODO reorder messages from later views
     propose_starts: HashMap<SeqNum, Instant>,
 }
@@ -133,15 +133,15 @@ pub struct PbftCore<C> {
 #[derive(Debug, BorshSerialize, BorshDeserialize)]
 struct LogSlot {
     requests: Vec<PbftRequest>,
-    signed_pre_prepare: (PrePrepare, SigBytes),
-    signed_prepares: HashMap<ReplicaIndex, (Prepare, SigBytes)>,
-    signed_commits: HashMap<ReplicaIndex, (Commit, SigBytes)>,
+    signed_pre_prepare: (PrePrepare, Sig),
+    signed_prepares: HashMap<ReplicaIndex, (Prepare, Sig)>,
+    signed_commits: HashMap<ReplicaIndex, (Commit, Sig)>,
 }
 
 #[derive(Debug, BorshSerialize, BorshDeserialize)]
 struct CheckpointProof {
     state_digest: Digest,
-    signed_checkpoints: HashMap<ReplicaIndex, (Checkpoint, SigBytes)>,
+    signed_checkpoints: HashMap<ReplicaIndex, (Checkpoint, Sig)>,
 }
 
 impl PbftParams {
@@ -236,7 +236,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
 
     // should call with verified messages and their signatures
     #[instrument(skip(self), fields(replica_index = self.config.replica_index))]
-    pub async fn on_message(&mut self, message: PbftMessage, sig: SigBytes) {
+    pub async fn on_message(&mut self, message: PbftMessage, sig: Sig) {
         if let Some(view_num) = message.view_num()
             && view_num != self.view_num
         {
@@ -322,7 +322,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
         &mut self,
         pre_prepare: PrePrepare,
         requests: Vec<PbftRequest>,
-        sig: SigBytes,
+        sig: Sig,
     ) {
         let seq_num = pre_prepare.seq_num;
         if seq_num > self.last_stable() + self.config.window_size {
@@ -381,7 +381,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
         }
     }
 
-    async fn handle_prepare(&mut self, prepare: Prepare, sig: SigBytes) {
+    async fn handle_prepare(&mut self, prepare: Prepare, sig: Sig) {
         let Some(slot) = &self.log.get(&prepare.seq_num) else {
             self.reorder_prepares
                 .entry(prepare.seq_num)
@@ -412,7 +412,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
         self.insert_prepare(prepare, sig).await;
     }
 
-    async fn insert_prepare(&mut self, prepare: Prepare, sig: SigBytes) {
+    async fn insert_prepare(&mut self, prepare: Prepare, sig: Sig) {
         let seq_num = prepare.seq_num;
         let digest = prepare.digest.clone();
         let slot = self.log.get_mut(&seq_num).unwrap();
@@ -438,7 +438,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
         }
     }
 
-    async fn handle_commit(&mut self, commit: Commit, sig: SigBytes) {
+    async fn handle_commit(&mut self, commit: Commit, sig: Sig) {
         let Some(slot) = &self
             .log
             .get(&commit.seq_num)
@@ -468,7 +468,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
         self.insert_commit(commit, sig).await;
     }
 
-    async fn insert_commit(&mut self, commit: Commit, sig: SigBytes) {
+    async fn insert_commit(&mut self, commit: Commit, sig: Sig) {
         let seq_num = commit.seq_num;
         let slot = self.log.get_mut(&seq_num).unwrap();
         assert!(!self.config.params.slot_committed(slot));
@@ -500,7 +500,7 @@ impl<C: PbftCoreContext> PbftCore<C> {
         }
     }
 
-    async fn handle_checkpoint(&mut self, checkpoint: Checkpoint, sig: SigBytes) {
+    async fn handle_checkpoint(&mut self, checkpoint: Checkpoint, sig: Sig) {
         if checkpoint.seq_num <= self.last_stable() {
             return;
         }

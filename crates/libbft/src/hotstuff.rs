@@ -15,7 +15,7 @@ pub use core::{HotStuffCommand, HotStuffCoreConfig, HotStuffParams};
 pub mod events {
     use tokio::sync::oneshot;
 
-    use crate::{crypto::PartialSigBytes, event::Event};
+    use crate::event::Event;
 
     use super::core;
 
@@ -47,7 +47,7 @@ pub mod events {
     impl Event for MakeQuorumCert {
         type Value = (
             core::BlockDigest,
-            Vec<(core::ReplicaIndex, PartialSigBytes)>,
+            Vec<(core::ReplicaIndex, core::PartialSig)>,
         );
     }
 
@@ -182,12 +182,12 @@ impl core::HotStuffCoreContext for HotStuffCoreContextState {
     async fn make_quorum_cert(
         &mut self,
         block: core::BlockDigest,
-        sigs: impl IntoIterator<Item = (core::ReplicaIndex, crate::crypto::PartialSigBytes)>,
+        partial_sigs: impl IntoIterator<Item = (core::ReplicaIndex, core::PartialSig)>,
     ) {
         self.make_quorum_cert_tx
             .as_ref()
             .unwrap()
-            .send((block, sigs.into_iter().collect()), Span::current())
+            .send((block, partial_sigs.into_iter().collect()), Span::current())
             .await;
     }
 }
@@ -346,11 +346,11 @@ impl<C> EventSenderSlot<events::HandleQuorumCert> for HotStuffQuorumCertWorker<C
 
 impl<C: workers::HotStuffCryptoContext> HotStuffQuorumCertWorker<C> {
     pub async fn run(&mut self, token: &CancellationToken) {
-        while let Some(Some(((block, sigs), span))) = token
+        while let Some(Some(((block, partial_sigs), span))) = token
             .run_until_cancelled(self.make_quorum_cert.recv())
             .await
         {
-            let sig = match self.context.combine(sigs) {
+            let sig = match self.context.combine(partial_sigs) {
                 Ok(sig) => sig,
                 Err(err) => {
                     warn!("Failed to combine quorum cert signatures: {err:#}");
