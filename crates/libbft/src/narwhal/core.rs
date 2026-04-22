@@ -38,7 +38,7 @@ pub trait NarwhalCoreContext {
     // need to sign. may be loopback if signer == replica_index
     fn ack(
         &mut self,
-        round_num: RoundNum,
+        round: RoundNum,
         replica_index: ReplicaIndex,
         block_hash: BlockHash,
         signer: ReplicaIndex,
@@ -46,10 +46,11 @@ pub trait NarwhalCoreContext {
 }
 
 pub trait ConsensusProtocol {
+    type State;
+
     // called when a new block is certified and added to the DAG
-    // the returned block hashes will be committed and removed from the DAG and the store
     // the most useful states are `dag` and `store`
-    fn on_certified(&mut self, block_hash: &BlockHash) -> Vec<BlockHash>;
+    fn on_certified(&mut self, block_hash: &BlockHash) -> impl Future<Output = ()>;
 }
 
 #[derive(Debug, BorshSerialize, BorshDeserialize, Clone)]
@@ -63,7 +64,7 @@ pub enum NarwhalMessage {
 
 #[derive(Debug, BorshSerialize, BorshDeserialize, Clone)]
 pub struct NarwhalBlock {
-    round_num: RoundNum,
+    round: RoundNum,
     replica_index: ReplicaIndex,
     certs: Vec<NarwhalCert>,
     txns: Vec<NarwhalTxn>,
@@ -71,7 +72,7 @@ pub struct NarwhalBlock {
 
 #[derive(Debug, BorshSerialize, BorshDeserialize, Clone)]
 pub struct NarwhalCert {
-    round_num: RoundNum,
+    round: RoundNum,
     replica_index: ReplicaIndex,
     block_hash: BlockHash,
     // this seems to be a perfect use case of threshold schemes, but the origin paper explicitly
@@ -79,32 +80,40 @@ pub struct NarwhalCert {
     sigs: HashMap<ReplicaIndex, Sig>,
 }
 
-pub struct NarwhalCore<Context, Consensus> {
+pub struct NarwhalCore<Context, Consensus>
+where
+    Self: ConsensusProtocol,
+{
     context: Context,
     config: NarwhalCoreConfig<Consensus>,
+    consensus_state: <Self as ConsensusProtocol>::State,
 
     store: BlockStore,
     dag: Dag,
     pending_txns: Vec<NarwhalTxn>,
-    round_num: RoundNum,
+    round: RoundNum,
     received_blocks: HashMap<ReplicaIndex, BlockHash>, // of current round
     ack_sigs: HashMap<ReplicaIndex, Sig>,              // of current round
 }
 
-impl<Context, Consensus> NarwhalCore<Context, Consensus> {
-    pub fn new(
+impl<Context, Consensus> NarwhalCore<Context, Consensus>
+where
+    Self: ConsensusProtocol,
+{
+    pub fn new_with_consensus_state(
         context: Context,
-        consensus: Consensus,
         config: NarwhalCoreConfig<Consensus>,
+        consensus_state: <Self as ConsensusProtocol>::State,
     ) -> Self {
-        let (store, dag, pending_txns, round_num, received_blocks, ack_sigs) = Default::default();
+        let (store, dag, pending_txns, round, received_blocks, ack_sigs) = Default::default();
         Self {
             context,
             config,
+            consensus_state,
             store,
             dag,
             pending_txns,
-            round_num,
+            round,
             received_blocks,
             ack_sigs,
         }
@@ -131,12 +140,12 @@ where
 
     async fn create_block(&mut self) {
         let block = NarwhalBlock {
-            round_num: self.round_num,
+            round: self.round,
             replica_index: self.config.replica_index,
-            certs: if self.round_num == 0 {
+            certs: if self.round == 0 {
                 Default::default()
             } else {
-                self.dag[&(self.round_num - 1)].values().cloned().collect()
+                self.dag[&(self.round - 1)].values().cloned().collect()
             },
             txns: self
                 .pending_txns
@@ -149,7 +158,7 @@ where
 
     async fn handle_block(&mut self, block_hash: BlockHash, block: NarwhalBlock) {
         assert!(block.replica_index != self.config.replica_index);
-        if block.round_num != self.round_num {
+        if block.round != self.round {
             return;
         }
         if let Some(existing_block_hash) = self.received_blocks.get(&block.replica_index)
@@ -159,13 +168,13 @@ where
                 self.config.replica_index,
                 "Received duplicate block from replica {} for round {}: {existing_block_hash:?} vs {block_hash:?}",
                 block.replica_index,
-                block.round_num
+                block.round
             );
             return;
         }
         self.context
             .ack(
-                block.round_num,
+                block.round,
                 block.replica_index,
                 block_hash.clone(),
                 self.config.replica_index,
@@ -179,7 +188,7 @@ where
     async fn handle_ack(&mut self, block_hash: BlockHash, signer: ReplicaIndex, sig: Sig) {
         if self
             .dag
-            .get(&self.round_num)
+            .get(&self.round)
             .is_some_and(|round| round.contains_key(&self.config.replica_index))
         {
             return;
@@ -199,13 +208,13 @@ where
             );
             return;
         }
-        if block.round_num != self.round_num {
+        if block.round != self.round {
             return;
         }
         self.ack_sigs.insert(signer, sig);
         if self.ack_sigs.len() >= self.config.params.quorum_size() {
             let cert = NarwhalCert {
-                round_num: self.round_num,
+                round: self.round,
                 replica_index: self.config.replica_index,
                 block_hash,
                 sigs: take(&mut self.ack_sigs),
@@ -218,7 +227,7 @@ where
     async fn handle_cert(&mut self, cert: NarwhalCert) {
         if self
             .dag
-            .get(&cert.round_num)
+            .get(&cert.round)
             .is_some_and(|round| round.contains_key(&cert.replica_index))
         {
             return;
@@ -228,23 +237,104 @@ where
 
     async fn insert_cert(&mut self, cert: NarwhalCert) {
         let block_hash = cert.block_hash.clone();
-        let round_certs = self.dag.entry(cert.round_num).or_default();
+        let round_certs = self.dag.entry(cert.round).or_default();
         round_certs.insert(cert.replica_index, cert);
         assert!(round_certs.len() <= self.config.params.quorum_size());
         if round_certs.len() == self.config.params.quorum_size() {
-            self.round_num += 1;
+            self.round += 1;
             self.create_block().await;
         }
-        for committed_block_hash in self.on_certified(&block_hash) {
-            let block = self.store.remove(&committed_block_hash).unwrap();
-            let Entry::Occupied(mut entry) = self.dag.entry(block.round_num) else {
-                unreachable!()
-            };
-            entry.get_mut().remove(&block.replica_index).unwrap();
-            if entry.get().is_empty() {
-                entry.remove();
-            }
-            self.context.deliver(block).await;
+        self.on_certified(&block_hash).await;
+    }
+}
+
+pub struct Bullshark;
+
+#[derive(Default)]
+pub struct BullsharkState {
+    last_ordered_round: RoundNum,
+}
+
+impl<C: NarwhalCoreContext> NarwhalCore<C, Bullshark> {
+    pub fn new(context: C, config: NarwhalCoreConfig<Bullshark>) -> Self {
+        Self::new_with_consensus_state(context, config, Default::default())
+    }
+}
+
+impl<C: NarwhalCoreContext> ConsensusProtocol for NarwhalCore<C, Bullshark> {
+    type State = BullsharkState;
+
+    async fn on_certified(&mut self, block_hash: &BlockHash) {
+        let block = &self.store[block_hash];
+        if block.round == 0 || !block.round.is_multiple_of(2) {
+            return;
         }
+        let anchor_round = block.round - 2;
+        let Some(anchor) = self.get_anchor(anchor_round) else {
+            return;
+        };
+        if self.dag[&(anchor_round + 1)]
+            .values()
+            .filter(|cert| {
+                self.store[&cert.block_hash]
+                    .certs
+                    .iter()
+                    .any(|c| &c.block_hash == anchor)
+            })
+            .count()
+            > self.config.params.num_faulty_replicas
+        {
+            self.order_anchors(anchor.clone()).await;
+        }
+    }
+}
+
+impl<C: NarwhalCoreContext> NarwhalCore<C, Bullshark> {
+    fn get_anchor(&self, round: RoundNum) -> Option<&BlockHash> {
+        assert!(round.is_multiple_of(2));
+        let anchor = &self.dag[&round]
+            .get(&((round / 2 % self.config.params.num_replicas as RoundNum) as _))?
+            .block_hash;
+        Some(anchor)
+    }
+
+    async fn order_anchors(&mut self, anchor: BlockHash) {
+        let mut prev_round = self.store[&anchor].round - 2;
+        let mut anchors = vec![anchor];
+        while prev_round > self.consensus_state.last_ordered_round {
+            let Some(prev_anchor) = self.get_anchor(prev_round) else {
+                continue;
+            };
+            if self.store[anchors.last().unwrap()]
+                .certs
+                .iter()
+                .any(|cert| {
+                    self.store[&cert.block_hash]
+                        .certs
+                        .iter()
+                        .any(|c| &c.block_hash == prev_anchor)
+                })
+            {
+                anchors.push(prev_anchor.clone());
+            }
+            prev_round -= 2;
+        }
+        self.consensus_state.last_ordered_round = self.store[anchors.first().unwrap()].round;
+
+        while let Some(anchor) = anchors.pop() {
+            let mut ordered = Vec::new();
+            self.vertices_to_order(&anchor, &mut ordered);
+            for block_hash in ordered {
+                self.context.deliver(self.store[&block_hash].clone()).await;
+            }
+        }
+        // TODO garbage collection
+    }
+
+    fn vertices_to_order(&self, anchor: &BlockHash, ordered: &mut Vec<BlockHash>) {
+        for cert in &self.store[anchor].certs {
+            self.vertices_to_order(&cert.block_hash, ordered);
+        }
+        ordered.push(anchor.clone());
     }
 }
