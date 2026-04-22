@@ -9,16 +9,19 @@ pub trait Event {
     type Value;
 }
 
-#[derive_where(Clone)]
-pub struct EventSender<E: Event> {
-    tx: Sender<(E::Value, tracing::Span)>,
-    gauge: Option<Gauge>,
-}
+// currently go with tokio channel to avoid introducing more dependencies
+// switch to async-channel when there's a solid use case of MPMC
 
 pub struct EventChannel<E: Event> {
     pub tx: Sender<(E::Value, tracing::Span)>,
     pub rx: Receiver<(E::Value, tracing::Span)>,
     pub gauge: Option<Gauge>,
+}
+
+#[derive_where(Clone)]
+pub struct EventSender<E: Event> {
+    tx: Sender<(E::Value, tracing::Span)>,
+    gauge: Option<Gauge>,
 }
 
 impl<E: Event> EventChannel<E> {
