@@ -134,8 +134,14 @@ where
         self.create_block().await;
     }
 
-    pub async fn on_message(&mut self, msg: NarwhalMessage) {
-        //
+    pub async fn on_message(&mut self, message: NarwhalMessage) {
+        match message {
+            NarwhalMessage::Block(block_hash, block) => self.handle_block(block_hash, block).await,
+            NarwhalMessage::Ack(block_hash, signer, sig) => {
+                self.handle_ack(block_hash, signer, sig).await
+            }
+            NarwhalMessage::Cert(cert) => self.handle_cert(cert).await,
+        }
     }
 
     async fn create_block(&mut self) {
@@ -242,6 +248,8 @@ where
         assert!(round_certs.len() <= self.config.params.quorum_size());
         if round_certs.len() == self.config.params.quorum_size() {
             self.round += 1;
+            self.received_blocks.clear();
+            self.ack_sigs.clear();
             self.create_block().await;
         }
         self.on_certified(&block_hash).await;
@@ -322,19 +330,17 @@ impl<C: NarwhalCoreContext> NarwhalCore<C, Bullshark> {
         self.consensus_state.last_ordered_round = self.store[anchors.first().unwrap()].round;
 
         while let Some(anchor) = anchors.pop() {
-            let mut ordered = Vec::new();
-            self.vertices_to_order(&anchor, &mut ordered);
-            for block_hash in ordered {
-                self.context.deliver(self.store[&block_hash].clone()).await;
-            }
+            self.deliver_blocks(anchor).await;
         }
-        // TODO garbage collection
     }
 
-    fn vertices_to_order(&self, anchor: &BlockHash, ordered: &mut Vec<BlockHash>) {
-        for cert in &self.store[anchor].certs {
-            self.vertices_to_order(&cert.block_hash, ordered);
+    async fn deliver_blocks(&mut self, block_hash: BlockHash) {
+        let Some(block) = self.store.remove(&block_hash) else {
+            return;
+        };
+        for cert in &block.certs {
+            Box::pin(self.deliver_blocks(cert.block_hash.clone())).await;
         }
-        ordered.push(anchor.clone());
+        self.context.deliver(block).await;
     }
 }
