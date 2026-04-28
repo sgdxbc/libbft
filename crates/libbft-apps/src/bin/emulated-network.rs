@@ -10,13 +10,16 @@ use libbft::{
     crypto::{Digest, DummyCrypto},
     event::{AsEmit, Emit, EventChannel, EventSender},
     hotstuff::{
-        self, HotStuffCommand, HotStuffCoreConfig, HotStuffEgress, HotStuffIngress,
-        HotStuffParams, HotStuffProtocol, HotStuffQuorumCertWorker,
+        self, HotStuffCommand, HotStuffCoreConfig, HotStuffEgress, HotStuffIngress, HotStuffParams,
+        HotStuffProtocol, HotStuffQuorumCertWorker,
+    },
+    narwhal::{
+        self, Bullshark, NarwhalCoreConfig, NarwhalEgress, NarwhalIngress, NarwhalParams,
+        NarwhalProtocol, NarwhalTxn,
     },
     network,
     pbft::{
-        self, PbftCoreConfig, PbftEgress, PbftIngress, PbftParams, PbftProtocol,
-        PbftRequest,
+        self, PbftCoreConfig, PbftEgress, PbftIngress, PbftParams, PbftProtocol, PbftRequest,
         events::{Deliver, SendBytes},
     },
     types::ReplicaIndex,
@@ -31,7 +34,7 @@ use tracing::info_span;
 async fn main() -> anyhow::Result<()> {
     let protocol = args()
         .find_map(|arg| match arg.strip_prefix("protocol=") {
-            Some(protocol @ ("pbft" | "hotstuff")) => Some(protocol.to_owned()),
+            Some(protocol @ ("pbft" | "hotstuff" | "bullshark")) => Some(protocol.to_owned()),
             Some(protocol) => {
                 eprintln!("Unsupported protocol: {protocol}");
                 None
@@ -70,6 +73,16 @@ async fn main() -> anyhow::Result<()> {
             );
             Network::HotStuff(network)
         }
+        "bullshark" => {
+            let mut network = BullsharkNetwork::new();
+            network.spawn_workers(
+                &mut join_set,
+                &mut node_bytes_tx_map,
+                fabric_bytes.sender(),
+                &token,
+            );
+            Network::Bullshark(network)
+        }
         _ => unreachable!(),
     };
 
@@ -92,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
             match &mut network {
                 Network::Pbft(network) => network.run_workload_loop().await,
                 Network::HotStuff(network) => network.run_workload_loop().await,
+                Network::Bullshark(network) => network.run_workload_loop().await,
             }
         };
         let interrupt = async {
@@ -110,6 +124,7 @@ async fn main() -> anyhow::Result<()> {
         let count = match &network {
             Network::Pbft(network) => network.count,
             Network::HotStuff(network) => network.count,
+            Network::Bullshark(network) => network.count,
         };
         tracing::info!("Finished {count} rounds");
         anyhow::Ok(())
@@ -131,6 +146,7 @@ async fn main() -> anyhow::Result<()> {
 enum Network {
     Pbft(PbftNetwork),
     HotStuff(HotStuffNetwork),
+    Bullshark(BullsharkNetwork),
 }
 
 const NUM_REPLICAS: usize = 4;
@@ -367,6 +383,111 @@ impl HotStuffNetwork {
                         .await
                         .with_context(|| format!("Node {i} deliver round {}", self.count))?;
                     block.commands.is_empty()
+                } {}
+                tracing::debug!("Node {i} delivered");
+            }
+            self.count += 1;
+            histogram!("deliver_latency").record(round_start.elapsed().as_secs_f64());
+        }
+    }
+}
+
+#[derive(Default)]
+struct BullsharkNetwork {
+    txn_tx_vec: Vec<EventSender<narwhal::events::HandleTxn>>,
+    deliver_vec: Vec<EventChannel<narwhal::events::Deliver>>,
+    count: u64,
+}
+
+impl BullsharkNetwork {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn params() -> NarwhalParams {
+        NarwhalParams {
+            num_replicas: NUM_REPLICAS,
+            num_faulty_replicas: NUM_FAULTY_REPLICAS,
+        }
+    }
+
+    fn spawn_workers(
+        &mut self,
+        join_set: &mut JoinSet<()>,
+        node_bytes_tx_map: &mut HashMap<SocketAddr, EventSender<network::events::HandleBytes>>,
+        fabric_bytes_tx: EventSender<network::events::SendBytes>,
+        token: &CancellationToken,
+    ) {
+        for i in 0..NUM_REPLICAS {
+            let config = NarwhalCoreConfig {
+                consensus: Bullshark,
+                params: Self::params(),
+                replica_index: i as _,
+                max_block_size: 1,
+            };
+
+            let mut protocol = NarwhalProtocol::new(config);
+            let mut ingress = NarwhalIngress::new(DummyCrypto, Self::params());
+            let mut egress = NarwhalEgress::new(
+                DummyCrypto,
+                Self::params(),
+                (0..NUM_REPLICAS)
+                    .filter(|&index| index != i)
+                    .map(|index| (index as _, replica_addr(index as _)))
+                    .collect(),
+            );
+
+            let mut emit_command = None;
+            protocol.register(
+                AsEmit(&mut emit_command),
+                AsEmit(&mut ingress).and(AsEmit(&mut egress)),
+            );
+            self.txn_tx_vec.push(emit_command.unwrap());
+            let mut node_bytes_tx = None;
+            ingress.register(AsEmit(&mut node_bytes_tx));
+            let node_bytes_tx = node_bytes_tx.unwrap();
+            node_bytes_tx_map.insert(replica_addr(i as _), node_bytes_tx);
+            egress.register(AsEmit(&mut protocol));
+
+            let deliver = EventChannel::new(None);
+            Emit::<narwhal::events::Deliver>::install(&mut AsEmit(&mut protocol), deliver.sender());
+            self.deliver_vec.push(deliver);
+            Emit::<narwhal::events::SendBytes>::install(
+                &mut AsEmit(&mut egress),
+                fabric_bytes_tx.clone(),
+            );
+
+            join_set.spawn({
+                let token = token.clone();
+                async move { protocol.run(&token).await }
+            });
+            join_set.spawn({
+                let token = token.clone();
+                async move { egress.run(&token).await }
+            });
+            join_set.spawn({
+                let token = token.clone();
+                async move { ingress.run(&token).await }
+            });
+        }
+    }
+
+    async fn run_workload_loop(&mut self) -> anyhow::Result<()> {
+        loop {
+            let round_start = Instant::now();
+            let span = info_span!("Workload", round = self.count);
+            let sent = self.txn_tx_vec[self.count as usize % NUM_REPLICAS]
+                .send(NarwhalTxn(self.count.to_be_bytes().into()), span)
+                .await;
+            anyhow::ensure!(sent, "Failed to send command");
+            for (i, deliver) in self.deliver_vec.iter_mut().enumerate() {
+                while {
+                    let (block, _) = deliver
+                        .rx
+                        .recv()
+                        .await
+                        .with_context(|| format!("Node {i} deliver round {}", self.count))?;
+                    block.txns.is_empty()
                 } {}
                 tracing::debug!("Node {i} delivered");
             }

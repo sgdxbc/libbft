@@ -13,6 +13,8 @@ use crate::{
 mod core;
 mod workers;
 
+pub use core::{Bullshark, NarwhalCoreConfig, NarwhalParams, NarwhalTxn};
+
 pub mod events {
     use tokio::sync::oneshot;
 

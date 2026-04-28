@@ -67,7 +67,7 @@ pub struct NarwhalBlock {
     round: RoundNum,
     pub replica_index: ReplicaIndex,
     certs: Vec<NarwhalCert>,
-    txns: Vec<NarwhalTxn>,
+    pub txns: Vec<NarwhalTxn>,
 }
 
 #[derive(Debug, BorshSerialize, BorshDeserialize, Clone)]
