@@ -5,7 +5,8 @@ use bytes::Buf as _;
 use crate::{
     crypto::{DigestScheme, SigScheme},
     narwhal::core::{
-        BlockHash, NarwhalBlock, NarwhalCert, NarwhalMessage, ReplicaIndex, RoundNum, Sig,
+        BlockHash, NarwhalBlock, NarwhalCert, NarwhalMessage, NarwhalParams, ReplicaIndex,
+        RoundNum, Sig,
     },
 };
 
@@ -14,11 +15,12 @@ impl<C: SigScheme + DigestScheme> NarwhalCryptoContext for C {}
 
 pub struct NarwhalWorker<C> {
     context: C,
+    params: NarwhalParams,
 }
 
 impl<C> NarwhalWorker<C> {
-    pub fn new(context: C) -> Self {
-        Self { context }
+    pub fn new(context: C, params: NarwhalParams) -> Self {
+        Self { context, params }
     }
 }
 
@@ -105,7 +107,20 @@ impl<C: NarwhalCryptoContext> NarwhalWorker<C> {
                 self.context.verify(&ack_bytes, &sig, replica_index)?;
                 NarwhalMessage::Ack(block_hash, replica_index, sig)
             }
-            NarwhalNetworkMessage::Cert(cert) => NarwhalMessage::Cert(cert),
+            NarwhalNetworkMessage::Cert(cert) => {
+                if cert.round != Default::default() {
+                    anyhow::ensure!(
+                        cert.sigs.len() >= self.params.quorum_size(),
+                        "Not enough signatures in cert"
+                    );
+                }
+                let cert_bytes =
+                    borsh::to_vec(&(&cert.block_hash, cert.round, cert.replica_index)).unwrap();
+                for (&signer, sig) in &cert.sigs {
+                    self.context.verify(&cert_bytes, sig, signer)?;
+                }
+                NarwhalMessage::Cert(cert)
+            }
         };
         Ok(message)
     }

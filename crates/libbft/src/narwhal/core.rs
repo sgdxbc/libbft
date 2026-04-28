@@ -1,9 +1,7 @@
-use std::{
-    collections::{HashMap, hash_map::Entry},
-    mem::take,
-};
+use std::{collections::HashMap, mem::take};
 
 use borsh::{BorshDeserialize, BorshSerialize};
+use tokio::time::Instant;
 use tracing::warn;
 
 pub type BlockHash = crate::crypto::Digest;
@@ -28,7 +26,7 @@ pub trait NarwhalCoreContext {
     fn deliver(&mut self, block: NarwhalBlock) -> impl Future<Output = ()>;
 
     // need to sign. no loopback
-    fn broadcast_block(&mut self, block: NarwhalBlock) -> impl Future<Output = BlockHash>;
+    fn broadcast_block(&mut self, block: NarwhalBlock) -> impl Future<Output = Option<BlockHash>>;
 
     // no need to sign. no loopback
     fn broadcast_cert(&mut self, cert: NarwhalCert) -> impl Future<Output = ()>;
@@ -74,19 +72,19 @@ pub struct NarwhalBlock {
 
 #[derive(Debug, BorshSerialize, BorshDeserialize, Clone)]
 pub struct NarwhalCert {
-    round: RoundNum,
-    replica_index: ReplicaIndex,
-    block_hash: BlockHash,
+    pub round: RoundNum,
+    pub replica_index: ReplicaIndex,
+    pub block_hash: BlockHash,
     // this seems to be a perfect use case of threshold schemes, but the origin paper explicitly
     // opted for a simple signature vector
-    sigs: HashMap<ReplicaIndex, Sig>,
+    pub sigs: HashMap<ReplicaIndex, Sig>,
 }
 
 pub struct NarwhalCore<Context, Consensus>
 where
     Self: ConsensusProtocol,
 {
-    context: Context,
+    pub context: Context,
     config: NarwhalCoreConfig<Consensus>,
     consensus_state: <Self as ConsensusProtocol>::State,
 
@@ -123,7 +121,7 @@ where
 }
 
 impl NarwhalParams {
-    fn quorum_size(&self) -> usize {
+    pub fn quorum_size(&self) -> usize {
         self.num_replicas - self.num_faulty_replicas
     }
 }
@@ -136,6 +134,10 @@ where
         self.create_block().await;
     }
 
+    pub async fn on_txn(&mut self, txn: NarwhalTxn) {
+        self.pending_txns.push(txn);
+    }
+
     pub async fn on_message(&mut self, message: NarwhalMessage) {
         match message {
             NarwhalMessage::Block(block_hash, block) => self.handle_block(block_hash, block).await,
@@ -146,11 +148,15 @@ where
         }
     }
 
+    pub async fn on_tick(&mut self, now: Instant) {
+        let _ = now;
+    }
+
     async fn create_block(&mut self) {
         let block = NarwhalBlock {
             round: self.round,
             replica_index: self.config.replica_index,
-            certs: if self.round == 0 {
+            certs: if self.round == Default::default() {
                 Default::default()
             } else {
                 self.dag[&(self.round - 1)].values().cloned().collect()
@@ -160,8 +166,9 @@ where
                 .drain(..self.pending_txns.len().min(self.config.max_block_size))
                 .collect(),
         };
-        let block_hash = self.context.broadcast_block(block.clone()).await;
-        self.store.insert(block_hash, block);
+        if let Some(block_hash) = self.context.broadcast_block(block.clone()).await {
+            self.store.insert(block_hash, block);
+        }
     }
 
     async fn handle_block(&mut self, block_hash: BlockHash, block: NarwhalBlock) {

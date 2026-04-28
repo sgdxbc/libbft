@@ -57,6 +57,8 @@ pub mod events {
     }
 
     pub type SendBytes = crate::network::events::SendBytes;
+
+    pub type HandleBytes = crate::network::events::HandleBytes;
 }
 
 pub struct HotStuffProtocol {
@@ -278,7 +280,7 @@ impl<C: workers::HotStuffCryptoContext> HotStuffEgress<C> {
 pub struct HotStuffIngress<C> {
     state: workers::HotStuffWorker<C>,
 
-    bytes: EventChannel<crate::network::events::HandleBytes>,
+    bytes: EventChannel<events::HandleBytes>,
 
     message_tx: Option<EventSender<events::HandleMessage>>,
 }
