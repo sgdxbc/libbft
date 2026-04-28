@@ -96,6 +96,7 @@ where
     store: HashMap<BlockHash, NarwhalBlock>,
     dag: HashMap<RoundNum, HashMap<ReplicaIndex, NarwhalCert>>,
     pending_txns: Vec<NarwhalTxn>,
+    broadcasting_txns: Vec<NarwhalTxn>,
     round: RoundNum,
     received_blocks: HashMap<ReplicaIndex, BlockHash>, // of current round
     ack_sigs: HashMap<ReplicaIndex, Sig>,              // of current round
@@ -110,7 +111,8 @@ where
         config: NarwhalCoreConfig<Consensus>,
         consensus_state: <Self as ConsensusProtocol>::State,
     ) -> Self {
-        let (store, dag, pending_txns, round, received_blocks, ack_sigs) = Default::default();
+        let (store, dag, pending_txns, broadcasting_txns, round, received_blocks, ack_sigs) =
+            Default::default();
         Self {
             context,
             config,
@@ -118,6 +120,7 @@ where
             store,
             dag,
             pending_txns,
+            broadcasting_txns,
             round,
             received_blocks,
             ack_sigs,
@@ -163,6 +166,10 @@ where
 
     #[instrument(parent = None, skip(self), fields(replica_index = self.config.replica_index))]
     async fn create_block(&mut self) {
+        self.broadcasting_txns = self
+            .pending_txns
+            .drain(..self.pending_txns.len().min(self.config.max_block_size))
+            .collect();
         let block = NarwhalBlock {
             round: self.round,
             replica_index: self.config.replica_index,
@@ -171,10 +178,7 @@ where
             } else {
                 self.dag[&(self.round - 1)].values().cloned().collect()
             },
-            txns: self
-                .pending_txns
-                .drain(..self.pending_txns.len().min(self.config.max_block_size))
-                .collect(),
+            txns: self.broadcasting_txns.clone(),
         };
         if let Some(block_hash) = self.context.broadcast_block(block.clone()).await {
             self.store.insert(block_hash, block);
@@ -243,6 +247,7 @@ where
                 sigs: take(&mut self.ack_sigs),
             };
             self.context.broadcast_cert(cert.clone()).await;
+            self.broadcasting_txns.clear();
             self.insert_cert(cert).await;
         }
     }
@@ -269,6 +274,8 @@ where
                 self.round = round + 1;
                 self.received_blocks.clear();
                 self.ack_sigs.clear();
+                self.pending_txns
+                    .splice(..0, self.broadcasting_txns.drain(..));
                 self.create_block().await;
             }
         }

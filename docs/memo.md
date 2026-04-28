@@ -50,3 +50,9 @@ Also, blockchain protocols often deal with large batches of transactions, and si
 Lastly, some candidate cryptography solutions only expose interfaces for hashing arbitrary-length byte sequences and digest internally to encapsulate complexity of various digest lengths.
 In the end, the signing methods usually have the encoded bytes available as well and just takes both functions.
 After all, in such a researching codebase, shorter and less complicated pipelines are somewhat considered as a good thing.
+
+**Lossless atomic broadcast protocols.**
+The _lossless delivery_ means all submitted transactions are eventually delivered.
+Certain protocols may have further rules on how the transactions are submitted, e.g. in HotStuff each transaction should be submitted on every replica.
+Normally this requirement is trivial for leader-based protocols, and should be easily feasible for leaderless protocols with a bit careful treatment.
+Ensuring lossless delivery makes the protocols much more useful to close loop workloads and even specific open loop ones like UTXO transfers.

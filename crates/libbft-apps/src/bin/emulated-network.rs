@@ -15,7 +15,7 @@ use libbft::{
     },
     narwhal::{
         self, Bullshark, NarwhalCoreConfig, NarwhalEgress, NarwhalIngress, NarwhalParams,
-        NarwhalProtocol,
+        NarwhalProtocol, NarwhalTxn,
     },
     network,
     pbft::{
@@ -394,6 +394,7 @@ impl HotStuffNetwork {
 
 #[derive(Default)]
 struct BullsharkNetwork {
+    txn_tx_vec: Vec<EventSender<narwhal::events::HandleTxn>>,
     deliver_vec: Vec<EventChannel<narwhal::events::Deliver>>,
     count: u64,
 }
@@ -436,10 +437,12 @@ impl BullsharkNetwork {
                     .collect(),
             );
 
+            let mut emit_txn = None;
             protocol.register(
-                AsEmit(&mut None),
+                AsEmit(&mut emit_txn),
                 AsEmit(&mut ingress).and(AsEmit(&mut egress)),
             );
+            self.txn_tx_vec.push(emit_txn.unwrap());
             let mut node_bytes_tx = None;
             ingress.register(AsEmit(&mut node_bytes_tx));
             let node_bytes_tx = node_bytes_tx.unwrap();
@@ -472,22 +475,21 @@ impl BullsharkNetwork {
     async fn run_workload_loop(&mut self) -> anyhow::Result<()> {
         loop {
             let round_start = Instant::now();
-            let mut expected = None;
+            let span = info_span!("Workload", round = self.count);
+            let sent = self.txn_tx_vec[self.count as usize % NUM_REPLICAS]
+                .send(NarwhalTxn(self.count.to_be_bytes().into()), span)
+                .await;
+            anyhow::ensure!(sent, "Failed to send request");
             for (i, deliver) in self.deliver_vec.iter_mut().enumerate() {
-                let (block, _) = deliver
-                    .rx
-                    .recv()
-                    .await
-                    .with_context(|| format!("Node {i} deliver round {}", self.count))?;
+                while {
+                    let (block, _) = deliver
+                        .rx
+                        .recv()
+                        .await
+                        .with_context(|| format!("Node {i} deliver round {}", self.count))?;
+                    block.txns.is_empty()
+                } {}
                 tracing::debug!("Node {i} delivered");
-                if i == 0 {
-                    expected = Some((block.round, block.replica_index));
-                } else {
-                    anyhow::ensure!(
-                        Some((block.round, block.replica_index)) == expected,
-                        "Node {i} delivered unexpected block"
-                    );
-                }
             }
             self.count += 1;
             histogram!("deliver_latency").record(round_start.elapsed().as_secs_f64());
