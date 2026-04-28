@@ -33,3 +33,11 @@ Meanwhile, producing a block (during `onPropose` of the original paper) is parti
 The block digest is used to synchronously update protocol state `block_leaf`, which is crucial for correct leader behavior.
 It is possible to delay updating state to receiving the loopback generic message, but then we have to do bookkeeping about we are pending the digest of the actual leaf block and the protocol is actually in an inconsistent state, which will effectively _block_ the following proposal just as the synchronous code would do, so we certainly should go with synchronous digest computing.
 On the other hand, the original paper explicitly states that handling generic message has no difference either on leader itself or on other nodes, so we just go with the already existing generic message callback.
+
+**Actor shutdown.**
+The actors in this codebase are bare metal as in https://ryhl.io/blog/actors-with-tokio/, but the management is a bit different (probably more complicated).
+Most significantly, the actors hold senders for their accepted event streams, and their shutdown is not implicitly signaled by channel(s) closing but an explicit cancellation token.
+This is because in our codebase, cyclic workflow is everywhere on every level.
+Egress workers loop back messages to the protocol actors.
+Peers are interconnected in full mesh, and no connection will ever be shut down if the peers only shut down connections when someone else shut down earlier.
+The article does mention a strategy for cyclic cases, but I don't think that is simpler (or clearer) than mine.

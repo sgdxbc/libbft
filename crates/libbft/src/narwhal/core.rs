@@ -9,9 +9,7 @@ use tracing::warn;
 pub type BlockHash = crate::crypto::Digest;
 pub type RoundNum = u64;
 pub type ReplicaIndex = crate::types::ReplicaIndex;
-type Dag = HashMap<RoundNum, HashMap<ReplicaIndex, NarwhalCert>>;
-type BlockStore = HashMap<BlockHash, NarwhalBlock>;
-type Sig = crate::crypto::SigBytes;
+pub type Sig = crate::crypto::SigBytes;
 
 pub struct NarwhalParams {
     pub num_replicas: usize,
@@ -38,13 +36,17 @@ pub trait NarwhalCoreContext {
     // need to sign. may be loopback if signer == replica_index
     fn ack(
         &mut self,
+        block_hash: BlockHash,
         round: RoundNum,
         replica_index: ReplicaIndex,
-        block_hash: BlockHash,
         signer: ReplicaIndex,
     ) -> impl Future<Output = ()>;
 }
 
+// common abstraction for "zero-cost" consensus like Tusk and Bullshark
+// the "using narwhal for consensus" (section 3.2) mode is not explicitly
+// supported but probably feasible with an EventSender as consensus state that
+// emit certified blocks to an external consensus protocol
 pub trait ConsensusProtocol {
     type State;
 
@@ -65,7 +67,7 @@ pub enum NarwhalMessage {
 #[derive(Debug, BorshSerialize, BorshDeserialize, Clone)]
 pub struct NarwhalBlock {
     round: RoundNum,
-    replica_index: ReplicaIndex,
+    pub replica_index: ReplicaIndex,
     certs: Vec<NarwhalCert>,
     txns: Vec<NarwhalTxn>,
 }
@@ -88,8 +90,8 @@ where
     config: NarwhalCoreConfig<Consensus>,
     consensus_state: <Self as ConsensusProtocol>::State,
 
-    store: BlockStore,
-    dag: Dag,
+    store: HashMap<BlockHash, NarwhalBlock>,
+    dag: HashMap<RoundNum, HashMap<ReplicaIndex, NarwhalCert>>,
     pending_txns: Vec<NarwhalTxn>,
     round: RoundNum,
     received_blocks: HashMap<ReplicaIndex, BlockHash>, // of current round
@@ -180,9 +182,9 @@ where
         }
         self.context
             .ack(
+                block_hash.clone(),
                 block.round,
                 block.replica_index,
-                block_hash.clone(),
                 self.config.replica_index,
             )
             .await;
@@ -335,6 +337,9 @@ impl<C: NarwhalCoreContext> NarwhalCore<C, Bullshark> {
     }
 
     async fn deliver_blocks(&mut self, block_hash: BlockHash) {
+        // it is safe to do inline garbage collection here because we will not track down the out
+        // links of this block for a second time, and if we are led to this very block again via
+        // some other path, the recursion should stop here anyway
         let Some(block) = self.store.remove(&block_hash) else {
             return;
         };
