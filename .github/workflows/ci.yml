@@ -31,3 +31,5 @@ jobs:
       run: ./scripts/run-app.sh emulated-network protocol=pbft | grep -E "Finished [1-9][0-9]{3,} rounds"
     - name: Run HotStuff with emulated network
       run: ./scripts/run-app.sh emulated-network protocol=hotstuff | grep -E "Finished [1-9][0-9]{3,} rounds"
+    - name: Run Bullshark with emulated network
+      run: ./scripts/run-app.sh emulated-network protocol=bullshark | grep -E "Finished [1-9][0-9]{3,} rounds"

@@ -1,4 +1,7 @@
-use std::{collections::HashMap, mem::take};
+use std::{
+    collections::{HashMap, hash_map::Entry},
+    mem::take,
+};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use tokio::time::Instant;
@@ -59,7 +62,7 @@ pub enum NarwhalMessage {
 
 #[derive(Debug, BorshSerialize, BorshDeserialize, Clone)]
 pub struct NarwhalBlock {
-    round: RoundNum,
+    pub round: RoundNum,
     pub replica_index: ReplicaIndex,
     certs: Vec<NarwhalCert>,
     pub txns: Vec<NarwhalTxn>,
@@ -183,15 +186,15 @@ where
         if block.round != self.round {
             return;
         }
-        if let Some(existing_block_hash) = self.received_blocks.get(&block.replica_index)
-            && existing_block_hash != &block_hash
-        {
-            warn!(
-                self.config.replica_index,
-                "Received duplicate block from replica {} for round {}: {existing_block_hash:?} vs {block_hash:?}",
-                block.replica_index,
-                block.round
-            );
+        if let Some(existing_block_hash) = self.received_blocks.get(&block.replica_index) {
+            if existing_block_hash != &block_hash {
+                warn!(
+                    self.config.replica_index,
+                    "Received multiple blocks from replica {} for round {}: {existing_block_hash:?} vs {block_hash:?}",
+                    block.replica_index,
+                    block.round
+                );
+            }
             return;
         }
         let ack = NarwhalAck {
@@ -260,10 +263,10 @@ where
         let block_hash = cert.block_hash.clone();
         let round_certs = self.dag.entry(round).or_default();
         round_certs.insert(cert.replica_index, cert);
-        if round == self.round {
+        if round >= self.round {
             assert!(round_certs.len() <= self.config.params.quorum_size());
             if round_certs.len() == self.config.params.quorum_size() {
-                self.round += 1;
+                self.round = round + 1;
                 self.received_blocks.clear();
                 self.ack_sigs.clear();
                 self.create_block().await;
@@ -358,6 +361,13 @@ impl<C: NarwhalCoreContext> NarwhalCore<C, Bullshark> {
         let Some(block) = self.store.remove(&block_hash) else {
             return;
         };
+        let Entry::Occupied(mut entry) = self.dag.entry(block.round) else {
+            unreachable!()
+        };
+        entry.get_mut().remove(&block.replica_index);
+        if entry.get().is_empty() {
+            entry.remove();
+        }
         for cert in &block.certs {
             Box::pin(self.deliver_blocks(cert.block_hash.clone())).await;
         }
