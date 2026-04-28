@@ -6,8 +6,7 @@ use crate::{
     crypto::{DigestScheme, SigBytes, SigScheme},
     pbft::{
         PbftRequest,
-        core::{Checkpoint, PbftSyncMessage},
-        events::HandleMessageValue,
+        core::{Checkpoint, PbftSyncMessage, Sig},
     },
 };
 
@@ -37,6 +36,11 @@ impl<C> PbftWorker<C> {
     pub fn new(context: C, params: PbftParams) -> Self {
         Self { context, params }
     }
+}
+
+pub enum Ingress {
+    Signed(PbftMessage, Sig),
+    Sync(PbftSyncMessage),
 }
 
 impl<C: PbftCryptoContext> PbftWorker<C> {
@@ -76,7 +80,7 @@ impl<C: PbftCryptoContext> PbftWorker<C> {
         .concat()
     }
 
-    pub fn ingress(&self, mut bytes: &[u8]) -> anyhow::Result<HandleMessageValue> {
+    pub fn ingress(&self, mut bytes: &[u8]) -> anyhow::Result<Ingress> {
         let message_len = bytes.try_get_u32_le()? as usize;
         let message_bytes = bytes
             .split_off(..message_len)
@@ -106,7 +110,7 @@ impl<C: PbftCryptoContext> PbftWorker<C> {
                         self.params.view_leader(pre_prepare.view_num),
                     )
                     .context("Failed to verify PrePrepare signature")?;
-                HandleMessageValue::Signed(PbftMessage::PrePrepare(pre_prepare, requests), sig)
+                Ingress::Signed(PbftMessage::PrePrepare(pre_prepare, requests), sig)
             }
             PbftNetworkMessage::Prepare(prepare) => {
                 let sig = SigBytes(
@@ -118,7 +122,7 @@ impl<C: PbftCryptoContext> PbftWorker<C> {
                 self.context
                     .verify(message_bytes, &sig, prepare.replica_index)
                     .context("Failed to verify Prepare signature")?;
-                HandleMessageValue::Signed(PbftMessage::Prepare(prepare), sig)
+                Ingress::Signed(PbftMessage::Prepare(prepare), sig)
             }
             PbftNetworkMessage::Commit(commit) => {
                 let sig = SigBytes(
@@ -130,7 +134,7 @@ impl<C: PbftCryptoContext> PbftWorker<C> {
                 self.context
                     .verify(message_bytes, &sig, commit.replica_index)
                     .context("Failed to verify Commit signature")?;
-                HandleMessageValue::Signed(PbftMessage::Commit(commit), sig)
+                Ingress::Signed(PbftMessage::Commit(commit), sig)
             }
             PbftNetworkMessage::Checkpoint(checkpoint) => {
                 let sig = SigBytes(
@@ -142,12 +146,10 @@ impl<C: PbftCryptoContext> PbftWorker<C> {
                 self.context
                     .verify(message_bytes, &sig, checkpoint.replica_index)
                     .context("Failed to verify Checkpoint signature")?;
-                HandleMessageValue::Signed(PbftMessage::Checkpoint(checkpoint), sig)
+                Ingress::Signed(PbftMessage::Checkpoint(checkpoint), sig)
             }
 
-            PbftNetworkMessage::Request(request) => {
-                HandleMessageValue::Sync(PbftSyncMessage(request))
-            }
+            PbftNetworkMessage::Request(request) => Ingress::Sync(PbftSyncMessage(request)),
         };
         Ok(value)
     }

@@ -5,7 +5,10 @@ use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, Span, warn};
 
-use crate::event::{Emit, EventChannel, EventSender, EventSenderSlot};
+use crate::{
+    event::{Emit, EventChannel, EventSender, EventSenderSlot},
+    pbft::workers::Ingress,
+};
 
 mod core;
 #[cfg(test)]
@@ -24,14 +27,11 @@ pub mod events {
         type Value = core::PbftRequest;
     }
 
-    pub enum HandleMessageValue {
-        Signed(core::PbftMessage, core::Sig),
-        Sync(core::PbftSyncMessage),
-    }
-
+    // maybe do HandleMessage and HandleSyncMessage separately?
+    // currently doing this to avoid parallel channels (ingress -> protocol)
     pub struct HandleMessage;
     impl Event for HandleMessage {
-        type Value = HandleMessageValue;
+        type Value = super::workers::Ingress;
     }
 
     pub enum SendMessageValue {
@@ -124,10 +124,10 @@ impl PbftProtocol {
                 }
                 Some((value, span)) = self.message.recv() => {
                     match value {
-                        events::HandleMessageValue::Signed(message, sig) => {
+                        Ingress::Signed(message, sig) => {
                             self.core.on_message(message, sig).instrument(span).await
                         }
-                        events::HandleMessageValue::Sync(sync_message) => {
+                        Ingress::Sync(sync_message) => {
                             self.core.on_sync_message(sync_message).instrument(span).await
                         }
                     }
@@ -234,9 +234,7 @@ impl<C: workers::PbftCryptoContext> PbftEgress<C> {
                     for &addr in self.replica_addrs.values() {
                         bytes_tx.send((addr, bytes.clone()), span.clone()).await;
                     }
-                    loopback_tx
-                        .send(events::HandleMessageValue::Signed(message, sig), span)
-                        .await;
+                    loopback_tx.send(Ingress::Signed(message, sig), span).await;
                 }
                 events::SendMessageValue::Sync(to, message) => {
                     let bytes = self.state.egress_sync(message);
