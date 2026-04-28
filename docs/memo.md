@@ -41,3 +41,12 @@ This is because in our codebase, cyclic workflow is everywhere on every level.
 Egress workers loop back messages to the protocol actors.
 Peers are interconnected in full mesh, and no connection will ever be shut down if the peers only shut down connections when someone else shut down earlier.
 The article does mention a strategy for cyclic cases, but I don't think that is simpler (or clearer) than mine.
+
+**Serialization solution.**
+This codebase takes an uncommon approach that serialization is tightly coupled with cryptographic operations, for example, there is usually a single _egress_ method that does both encoding and signing signatures, instead of separated methods and workers.
+This is because this codebase uses Borsh-based digest solution, first encoding structured data into deterministic bytes and then digesting it, instead of directly digesting structured data.
+The rationale is that Rust does not have a widely-adopted solution for deriving digest hashing implementations.
+Also, blockchain protocols often deal with large batches of transactions, and single traversal over transaction batches for encoding + digesting over encoded bytes should be more efficient than dual traversals over transaction batches for digesting and encoding.
+Lastly, some candidate cryptography solutions only expose interfaces for hashing arbitrary-length byte sequences and digest internally to encapsulate complexity of various digest lengths.
+In the end, the signing methods usually have the encoded bytes available as well and just takes both functions.
+After all, in such a researching codebase, shorter and less complicated pipelines are somewhat considered as a good thing.

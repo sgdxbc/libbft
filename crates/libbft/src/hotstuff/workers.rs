@@ -66,12 +66,12 @@ impl<C: HotStuffCryptoContext> HotStuffWorker<C> {
 
     pub fn ingress(&self, mut bytes: &[u8]) -> anyhow::Result<HotStuffMessage> {
         let message_len = bytes.try_get_u32_le()? as usize;
-        let (message_bytes, data_bytes) = bytes
-            .split_at_checked(message_len)
+        let message_bytes = bytes
+            .split_off(..message_len)
             .context("Ingress message too short")?;
         let message = match borsh::from_slice(message_bytes)? {
             HotStuffNetworkMessage::Generic => {
-                let node = borsh::from_slice::<HotStuffNode>(data_bytes)?;
+                let node = borsh::from_slice::<HotStuffNode>(bytes)?;
                 self.context
                     .verify(&node.justify.block.0, &node.justify.sig)?;
                 let block = self.context.digest(&borsh::to_vec(&node).unwrap());
