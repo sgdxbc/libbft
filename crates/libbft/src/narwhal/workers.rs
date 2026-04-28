@@ -5,8 +5,8 @@ use bytes::Buf as _;
 use crate::{
     crypto::{DigestScheme, SigScheme},
     narwhal::core::{
-        BlockHash, NarwhalBlock, NarwhalCert, NarwhalMessage, NarwhalParams, ReplicaIndex,
-        RoundNum, Sig,
+        BlockHash, NarwhalAck, NarwhalBlock, NarwhalCert, NarwhalMessage, NarwhalParams,
+        ReplicaIndex, Sig,
     },
 };
 
@@ -27,7 +27,7 @@ impl<C> NarwhalWorker<C> {
 #[derive(Debug, BorshSerialize, BorshDeserialize)]
 enum NarwhalNetworkMessage {
     Block(Sig), // block data piggybacked
-    Ack(BlockHash, RoundNum, ReplicaIndex, Sig),
+    Ack(NarwhalAck, ReplicaIndex, Sig),
     Cert(NarwhalCert),
 }
 
@@ -48,30 +48,14 @@ impl<C: NarwhalCryptoContext> NarwhalWorker<C> {
         )
     }
 
-    pub fn sign_ack(
-        &self,
-        block_hash: &BlockHash,
-        round: RoundNum,
-        replica_index: ReplicaIndex,
-    ) -> Sig {
-        let ack_bytes = borsh::to_vec(&(block_hash, round, replica_index)).unwrap();
+    pub fn sign_ack(&self, ack: &NarwhalAck) -> Sig {
+        let ack_bytes = borsh::to_vec(ack).unwrap();
         self.context.sign(&ack_bytes)
     }
 
-    pub fn egress_ack(
-        &self,
-        block_hash: BlockHash,
-        round: RoundNum,
-        replica_index: ReplicaIndex,
-    ) -> Vec<u8> {
-        let sig = self.sign_ack(&block_hash, round, replica_index);
-        let message_bytes = borsh::to_vec(&NarwhalNetworkMessage::Ack(
-            block_hash,
-            round,
-            replica_index,
-            sig,
-        ))
-        .unwrap();
+    pub fn egress_ack(&self, ack: NarwhalAck, signer: ReplicaIndex) -> Vec<u8> {
+        let sig = self.sign_ack(&ack);
+        let message_bytes = borsh::to_vec(&NarwhalNetworkMessage::Ack(ack, signer, sig)).unwrap();
         [
             &(message_bytes.len() as u32).to_le_bytes()[..],
             &message_bytes,
@@ -102,10 +86,10 @@ impl<C: NarwhalCryptoContext> NarwhalWorker<C> {
                 let block_hash = self.context.digest(bytes);
                 NarwhalMessage::Block(block_hash, block)
             }
-            NarwhalNetworkMessage::Ack(block_hash, round, replica_index, sig) => {
-                let ack_bytes = borsh::to_vec(&(&block_hash, round, replica_index)).unwrap();
-                self.context.verify(&ack_bytes, &sig, replica_index)?;
-                NarwhalMessage::Ack(block_hash, replica_index, sig)
+            NarwhalNetworkMessage::Ack(ack, signer, sig) => {
+                let ack_bytes = borsh::to_vec(&ack).unwrap();
+                self.context.verify(&ack_bytes, &sig, signer)?;
+                NarwhalMessage::Ack(ack.block_hash, signer, sig)
             }
             NarwhalNetworkMessage::Cert(cert) => {
                 if cert.round != Default::default() {

@@ -39,12 +39,7 @@ pub mod events {
 
     pub enum SendMessageValue {
         Block(core::NarwhalBlock, oneshot::Sender<core::BlockHash>),
-        Ack(
-            core::BlockHash,
-            core::RoundNum,
-            core::ReplicaIndex,
-            core::ReplicaIndex,
-        ),
+        Ack(core::NarwhalAck, core::ReplicaIndex),
         Cert(core::NarwhalCert),
     }
     pub struct SendMessage;
@@ -172,20 +167,11 @@ impl core::NarwhalCoreContext for NarwhalCoreContextState {
             .await;
     }
 
-    async fn ack(
-        &mut self,
-        block_hash: core::BlockHash,
-        round: core::RoundNum,
-        replica_index: core::ReplicaIndex,
-        signer: core::ReplicaIndex,
-    ) {
+    async fn ack(&mut self, ack: core::NarwhalAck, signer: core::ReplicaIndex) {
         self.send_message_tx
             .as_ref()
             .expect("send_message_tx not set")
-            .send(
-                events::SendMessageValue::Ack(block_hash, round, replica_index, signer),
-                Span::current(),
-            )
+            .send(events::SendMessageValue::Ack(ack, signer), Span::current())
             .await;
     }
 }
@@ -252,21 +238,17 @@ impl<C: workers::NarwhalCryptoContext> NarwhalEgress<C> {
                             .await;
                     }
                 }
-                events::SendMessageValue::Ack(block_hash, round, replica_index, signer) => {
-                    if replica_index == signer {
-                        let sig = span
-                            .in_scope(|| self.worker.sign_ack(&block_hash, round, replica_index));
+                events::SendMessageValue::Ack(ack, signer) => {
+                    if ack.replica_index == signer {
+                        let sig = span.in_scope(|| self.worker.sign_ack(&ack));
                         self.message_tx
                             .as_ref()
                             .expect("message_tx not set")
-                            .send(
-                                core::NarwhalMessage::Ack(block_hash, replica_index, sig),
-                                span,
-                            )
+                            .send(core::NarwhalMessage::Ack(ack.block_hash, signer, sig), span)
                             .await;
                     } else {
-                        let bytes = span
-                            .in_scope(|| self.worker.egress_ack(block_hash, round, replica_index));
+                        let replica_index = ack.replica_index;
+                        let bytes = span.in_scope(|| self.worker.egress_ack(ack, signer));
                         self.bytes_tx
                             .as_ref()
                             .expect("bytes_tx not set")
