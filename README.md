@@ -1,7 +1,7 @@
 <div align="center">
 <img src="./docs/logo.svg" width=160>
 
-# $`\mathtt{lib}\beta\phi\tau`$
+# &#x1d695;&#x1d692;&#x1d68b;&#x1d4d1;&#x1d4d5;&#x1d4e3;
 
 The academic codebase for painless BFT researching and evaluation.
 

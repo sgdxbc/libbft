@@ -19,6 +19,10 @@ This method name should be interpreted as the consumer _register_ itself to thos
 I almost go for it but eventually concern that _subscribe_ implies multiple subscriber fan-out model, which is not true in this codebase as the event producer can only produce to one consumer (so every producer has only one consumer registered).
 Maybe just go with `connect`?
 
+In actor model, actors usually send and receive _messages_ instead of _events_.
+The term _event_ also leads to the pubsub confusion above and is probably not the best choice.
+The primary rationale is to avoid using the word _message_, which is intended for the peer messages of the protocol implementations.
+
 **Core protocols abstract cryptography away.**
 This design looks like a legitimate performance measurement, if considering the microsecond latency protocols (which happens to be the niche I started to write code for BFT protocols).
 However, in geological distributed deployments protocols take half seconds for each message step, and perform a 40us cryptographic operations on path seems to be sane.
