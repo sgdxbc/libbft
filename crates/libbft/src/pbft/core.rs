@@ -5,7 +5,7 @@ use metrics::{counter, gauge, histogram};
 use tokio::time::Instant;
 use tracing::{info, instrument, warn};
 
-pub type ReplicaIndex = crate::types::ReplicaIndex;
+pub type ReplicaIndex = crate::common::ReplicaIndex;
 pub type ViewNum = u64;
 pub type SeqNum = u64;
 pub type Digest = crate::crypto::Digest;
@@ -48,7 +48,7 @@ pub trait PbftCoreContext {
     ) -> impl Future<Output = ()>;
 }
 
-pub type PbftRequest = crate::types::Transaction;
+pub type PbftRequest = crate::common::Transaction;
 
 #[derive(Debug)]
 pub enum PbftMessage {

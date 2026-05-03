@@ -2,7 +2,7 @@ use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
-use crate::types::ReplicaIndex;
+use crate::common::ReplicaIndex;
 
 #[derive(BorshSerialize, BorshDeserialize, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Digest(pub Vec<u8>);

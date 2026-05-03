@@ -9,7 +9,7 @@ use tracing::{instrument, warn};
 
 pub type BlockHash = crate::crypto::Digest;
 pub type RoundNum = u64;
-pub type ReplicaIndex = crate::types::ReplicaIndex;
+pub type ReplicaIndex = crate::common::ReplicaIndex;
 pub type Sig = crate::crypto::SigBytes;
 
 pub struct NarwhalParams {
@@ -50,7 +50,7 @@ pub trait ConsensusProtocol {
     fn on_certified(&mut self, block_hash: &BlockHash) -> impl Future<Output = ()>;
 }
 
-pub type NarwhalTxn = crate::types::Transaction;
+pub type NarwhalTxn = crate::common::Transaction;
 
 #[derive(Debug)]
 pub enum NarwhalMessage {

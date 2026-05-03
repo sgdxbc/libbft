@@ -5,7 +5,7 @@ use metrics::counter;
 use tokio::time::Instant;
 use tracing::{debug, info, instrument, warn};
 
-pub type ReplicaIndex = crate::types::ReplicaIndex;
+pub type ReplicaIndex = crate::common::ReplicaIndex;
 pub type BlockDigest = crate::crypto::Digest; // we will call this `block`
 type Height = u64;
 pub type PartialSig = crate::crypto::PartialSigBytes;
@@ -51,7 +51,7 @@ pub trait HotStuffCoreContext {
     ) -> impl Future<Output = ()>;
 }
 
-pub type HotStuffCommand = crate::types::Transaction;
+pub type HotStuffCommand = crate::common::Transaction;
 
 #[derive(Debug, BorshSerialize, BorshDeserialize)]
 pub enum HotStuffMessage {

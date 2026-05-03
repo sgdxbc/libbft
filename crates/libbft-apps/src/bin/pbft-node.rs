@@ -2,13 +2,13 @@ use std::{net::SocketAddr, time::Instant};
 
 use anyhow::Context;
 use libbft::{
+    common::ReplicaIndex,
     crypto::{Digest, DummyCrypto},
     event::{AsEmit, Emit, EventChannel},
     pbft::{
         PbftCoreConfig, PbftEgress, PbftIngress, PbftParams, PbftProtocol, PbftRequest,
         events::Deliver,
     },
-    types::ReplicaIndex,
 };
 use libbft_apps::{init_metrics_exporter, init_telemetry};
 use libbft_tcp::peer::PeerNetwork;
@@ -29,7 +29,7 @@ fn replica_addr(index: ReplicaIndex) -> SocketAddr {
 }
 
 fn transaction(count: u64) -> PbftRequest {
-    libbft::types::Transaction {
+    libbft::common::Transaction {
         client_id: ([127, 0, 0, 1], 60000).into(),
         client_seq_num: count,
         payload: Default::default(),

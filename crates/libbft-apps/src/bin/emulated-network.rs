@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::Context;
 use libbft::{
+    common::{ReplicaIndex, Transaction},
     crypto::{Digest, DummyCrypto},
     event::{AsEmit, Emit, EventChannel, EventSender},
     hotstuff::{
@@ -22,7 +23,6 @@ use libbft::{
         self, PbftCoreConfig, PbftEgress, PbftIngress, PbftParams, PbftProtocol,
         events::{Deliver, SendBytes},
     },
-    types::{ReplicaIndex, Transaction},
 };
 use libbft_apps::{init_metrics_exporter, init_telemetry};
 use metrics::histogram;
