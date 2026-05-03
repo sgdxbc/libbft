@@ -51,8 +51,7 @@ pub trait HotStuffCoreContext {
     ) -> impl Future<Output = ()>;
 }
 
-#[derive(Debug, BorshSerialize, BorshDeserialize, Clone)]
-pub struct HotStuffCommand(pub Vec<u8>);
+pub type HotStuffCommand = crate::types::Transaction;
 
 #[derive(Debug, BorshSerialize, BorshDeserialize)]
 pub enum HotStuffMessage {

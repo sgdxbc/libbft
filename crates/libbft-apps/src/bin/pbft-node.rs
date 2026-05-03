@@ -28,6 +28,14 @@ fn replica_addr(index: ReplicaIndex) -> SocketAddr {
     ([127, 0, 0, 1], 4000 + index as u16).into()
 }
 
+fn transaction(count: u64) -> PbftRequest {
+    libbft::types::Transaction {
+        client_id: ([127, 0, 0, 1], 60000).into(),
+        client_seq_num: count,
+        payload: Default::default(),
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let index = std::env::args()
@@ -106,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
                 let start = Instant::now();
                 let span = info_span!("Workload", round = count);
                 if let Some(request_tx) = &request_tx {
-                    let sent = request_tx.send(PbftRequest(b"hello".into()), span).await;
+                    let sent = request_tx.send(transaction(count), span).await;
                     anyhow::ensure!(sent, "Failed to send request");
                 }
                 deliver
@@ -129,10 +137,7 @@ async fn main() -> anyhow::Result<()> {
         };
         tokio::select! {
             res = rounds => res?,
-            res = ctrl_c() => {
-                res.context("Failed to listen for Ctrl+C")?;
-                eprintln!();
-            }
+            res = ctrl_c() => res.context("Failed to listen for Ctrl+C")?,
         }
         info!("Finished {count} rounds");
         anyhow::Ok(())

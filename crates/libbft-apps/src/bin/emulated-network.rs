@@ -10,19 +10,19 @@ use libbft::{
     crypto::{Digest, DummyCrypto},
     event::{AsEmit, Emit, EventChannel, EventSender},
     hotstuff::{
-        self, HotStuffCommand, HotStuffCoreConfig, HotStuffEgress, HotStuffIngress, HotStuffParams,
+        self, HotStuffCoreConfig, HotStuffEgress, HotStuffIngress, HotStuffParams,
         HotStuffProtocol, HotStuffQuorumCertWorker,
     },
     narwhal::{
         self, Bullshark, NarwhalCoreConfig, NarwhalEgress, NarwhalIngress, NarwhalParams,
-        NarwhalProtocol, NarwhalTxn,
+        NarwhalProtocol,
     },
     network,
     pbft::{
-        self, PbftCoreConfig, PbftEgress, PbftIngress, PbftParams, PbftProtocol, PbftRequest,
+        self, PbftCoreConfig, PbftEgress, PbftIngress, PbftParams, PbftProtocol,
         events::{Deliver, SendBytes},
     },
-    types::ReplicaIndex,
+    types::{ReplicaIndex, Transaction},
 };
 use libbft_apps::{init_metrics_exporter, init_telemetry};
 use metrics::histogram;
@@ -156,6 +156,14 @@ fn replica_addr(index: ReplicaIndex) -> SocketAddr {
     ([10, 0, 0, index + 1], 3000).into()
 }
 
+fn transaction(count: u64) -> Transaction {
+    Transaction {
+        client_id: ([127, 0, 0, 1], 60000).into(),
+        client_seq_num: count,
+        payload: Default::default(),
+    }
+}
+
 #[derive(Default)]
 struct PbftNetwork {
     request_tx: Option<EventSender<pbft::events::HandleRequest>>,
@@ -248,7 +256,7 @@ impl PbftNetwork {
                 .request_tx
                 .as_ref()
                 .unwrap()
-                .send(PbftRequest(b"hello".into()), span)
+                .send(transaction(self.count), span)
                 .await;
             anyhow::ensure!(sent, "Failed to send request");
             for (i, deliver_rx) in self.deliver_vec.iter_mut().enumerate() {
@@ -367,12 +375,7 @@ impl HotStuffNetwork {
             let round_start = Instant::now();
             let span = info_span!("Workload", round = self.count);
             for command_tx in &self.command_tx_vec {
-                let sent = command_tx
-                    .send(
-                        HotStuffCommand(self.count.to_be_bytes().into()),
-                        span.clone(),
-                    )
-                    .await;
+                let sent = command_tx.send(transaction(self.count), span.clone()).await;
                 anyhow::ensure!(sent, "Failed to send command");
             }
             for (i, deliver) in self.deliver_vec.iter_mut().enumerate() {
@@ -477,7 +480,7 @@ impl BullsharkNetwork {
             let round_start = Instant::now();
             let span = info_span!("Workload", round = self.count);
             let sent = self.txn_tx_vec[self.count as usize % NUM_REPLICAS]
-                .send(NarwhalTxn(self.count.to_be_bytes().into()), span)
+                .send(transaction(self.count), span)
                 .await;
             anyhow::ensure!(sent, "Failed to send request");
             for (i, deliver) in self.deliver_vec.iter_mut().enumerate() {

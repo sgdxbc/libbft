@@ -56,7 +56,10 @@ In the end, the signing methods usually have the encoded bytes available as well
 After all, in such a researching codebase, shorter and less complicated pipelines are somewhat considered as a good thing.
 
 **Lossless atomic broadcast protocols.**
-The _lossless delivery_ means all submitted transactions are eventually delivered.
-Certain protocols may have further rules on how the transactions are submitted, e.g. in HotStuff each transaction should be submitted on every replica.
+The _lossless delivery_ means all properly submitted transactions are eventually delivered.
+Certain protocols may have further rules on how the transactions should be properly submitted, e.g. in HotStuff each transaction should be submitted on every replica.
 Normally this requirement is trivial for leader-based protocols, and should be easily feasible for leaderless protocols with a bit careful treatment.
 Ensuring lossless delivery makes the protocols much more useful to close loop workloads and even specific open loop ones like UTXO transfers.
+Remark: this is not a property or even invariant but just an informal guideline.
+It just says that the implementations should achieve this under the certain evaluated conditions, e.g., no leader failover.
+System liveness should not rely on this, just that we can expect that no timeout will involve and complicate the performance benchmarks.
