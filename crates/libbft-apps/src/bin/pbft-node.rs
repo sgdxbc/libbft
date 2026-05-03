@@ -2,13 +2,13 @@ use std::{net::SocketAddr, time::Instant};
 
 use anyhow::Context;
 use libbft::{
-    common::ReplicaIndex,
     crypto::{Digest, DummyCrypto},
     event::{AsEmit, Emit, EventChannel},
     pbft::{
         PbftCoreConfig, PbftEgress, PbftIngress, PbftParams, PbftProtocol, PbftRequest,
         events::Deliver,
     },
+    common::ReplicaIndex,
 };
 use libbft_apps::{init_metrics_exporter, init_telemetry};
 use libbft_tcp::peer::PeerNetwork;
@@ -26,14 +26,6 @@ fn params() -> PbftParams {
 
 fn replica_addr(index: ReplicaIndex) -> SocketAddr {
     ([127, 0, 0, 1], 4000 + index as u16).into()
-}
-
-fn transaction(count: u64) -> PbftRequest {
-    libbft::common::Txn {
-        client_id: ([127, 0, 0, 1], 60000).into(),
-        client_seq_num: count,
-        payload: Default::default(),
-    }
 }
 
 #[tokio::main]
@@ -114,7 +106,7 @@ async fn main() -> anyhow::Result<()> {
                 let start = Instant::now();
                 let span = info_span!("Workload", round = count);
                 if let Some(request_tx) = &request_tx {
-                    let sent = request_tx.send(transaction(count), span).await;
+                    let sent = request_tx.send(PbftRequest(b"hello".into()), span).await;
                     anyhow::ensure!(sent, "Failed to send request");
                 }
                 deliver
@@ -137,7 +129,10 @@ async fn main() -> anyhow::Result<()> {
         };
         tokio::select! {
             res = rounds => res?,
-            res = ctrl_c() => res.context("Failed to listen for Ctrl+C")?,
+            res = ctrl_c() => {
+                res.context("Failed to listen for Ctrl+C")?;
+                eprintln!();
+            }
         }
         info!("Finished {count} rounds");
         anyhow::Ok(())

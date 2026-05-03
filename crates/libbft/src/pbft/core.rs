@@ -48,7 +48,8 @@ pub trait PbftCoreContext {
     ) -> impl Future<Output = ()>;
 }
 
-pub type PbftRequest = crate::common::Txn;
+#[derive(Debug, BorshSerialize, BorshDeserialize, Clone)]
+pub struct PbftRequest(pub Vec<u8>);
 
 #[derive(Debug)]
 pub enum PbftMessage {

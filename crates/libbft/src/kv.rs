@@ -43,6 +43,7 @@ pub struct MemoryStore {
 }
 
 impl MemoryStore {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             data: Default::default(),
