@@ -29,7 +29,7 @@ fn replica_addr(index: ReplicaIndex) -> SocketAddr {
 }
 
 fn transaction(count: u64) -> PbftRequest {
-    libbft::common::Transaction {
+    libbft::common::Txn {
         client_id: ([127, 0, 0, 1], 60000).into(),
         client_seq_num: count,
         payload: Default::default(),

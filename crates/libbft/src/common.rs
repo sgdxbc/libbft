@@ -8,7 +8,14 @@ pub type ClientId = std::net::SocketAddr;
 pub type ClientSeqNum = u64;
 
 #[derive(BorshSerialize, BorshDeserialize, Clone)]
-pub struct Transaction {
+pub struct Txn {
+    pub client_id: ClientId,
+    pub client_seq_num: ClientSeqNum,
+    pub payload: Vec<u8>,
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Clone)]
+pub struct TxnCommit {
     pub client_id: ClientId,
     pub client_seq_num: ClientSeqNum,
     pub payload: Vec<u8>,
@@ -19,9 +26,19 @@ mod debug_impl {
 
     use super::*;
 
-    impl Debug for Transaction {
+    impl Debug for Txn {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("Transaction")
+            f.debug_struct("Txn")
+                .field("client_id", &self.client_id)
+                .field("client_seq_num", &self.client_seq_num)
+                .field("payload", &fmt_payload(&self.payload))
+                .finish()
+        }
+    }
+
+    impl Debug for TxnCommit {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("TxnCommit")
                 .field("client_id", &self.client_id)
                 .field("client_seq_num", &self.client_seq_num)
                 .field("payload", &fmt_payload(&self.payload))

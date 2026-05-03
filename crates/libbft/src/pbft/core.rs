@@ -48,7 +48,7 @@ pub trait PbftCoreContext {
     ) -> impl Future<Output = ()>;
 }
 
-pub type PbftRequest = crate::common::Transaction;
+pub type PbftRequest = crate::common::Txn;
 
 #[derive(Debug)]
 pub enum PbftMessage {

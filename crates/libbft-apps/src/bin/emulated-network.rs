@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::Context;
 use libbft::{
-    common::{ReplicaIndex, Transaction},
+    common::{ReplicaIndex, Txn},
     crypto::{Digest, DummyCrypto},
     event::{AsEmit, Emit, EventChannel, EventSender},
     hotstuff::{
@@ -156,8 +156,8 @@ fn replica_addr(index: ReplicaIndex) -> SocketAddr {
     ([10, 0, 0, index + 1], 3000).into()
 }
 
-fn transaction(count: u64) -> Transaction {
-    Transaction {
+fn transaction(count: u64) -> Txn {
+    Txn {
         client_id: ([127, 0, 0, 1], 60000).into(),
         client_seq_num: count,
         payload: Default::default(),

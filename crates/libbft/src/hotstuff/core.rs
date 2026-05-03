@@ -51,7 +51,7 @@ pub trait HotStuffCoreContext {
     ) -> impl Future<Output = ()>;
 }
 
-pub type HotStuffCommand = crate::common::Transaction;
+pub type HotStuffCommand = crate::common::Txn;
 
 #[derive(Debug, BorshSerialize, BorshDeserialize)]
 pub enum HotStuffMessage {

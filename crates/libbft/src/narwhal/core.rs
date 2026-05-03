@@ -50,7 +50,7 @@ pub trait ConsensusProtocol {
     fn on_certified(&mut self, block_hash: &BlockHash) -> impl Future<Output = ()>;
 }
 
-pub type NarwhalTxn = crate::common::Transaction;
+pub type NarwhalTxn = crate::common::Txn;
 
 #[derive(Debug)]
 pub enum NarwhalMessage {
