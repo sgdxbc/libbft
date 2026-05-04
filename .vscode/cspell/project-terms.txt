@@ -9,6 +9,7 @@ libbft
 MPMC
 oneshot
 pbft
+rocksdb
 tokei
 txns
 UTXO

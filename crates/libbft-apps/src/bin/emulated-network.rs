@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::Context;
 use libbft::{
+    common::ReplicaIndex,
     crypto::{Digest, DummyCrypto},
     event::{AsEmit, Emit, EventChannel, EventSender},
     hotstuff::{
@@ -22,7 +23,6 @@ use libbft::{
         self, PbftCoreConfig, PbftEgress, PbftIngress, PbftParams, PbftProtocol, PbftRequest,
         events::{Deliver, SendBytes},
     },
-    common::ReplicaIndex,
 };
 use libbft_apps::{init_metrics_exporter, init_telemetry};
 use metrics::histogram;
@@ -378,7 +378,6 @@ impl HotStuffNetwork {
             for (i, deliver) in self.deliver_vec.iter_mut().enumerate() {
                 while {
                     let (block, _) = deliver
-                        .rx
                         .recv()
                         .await
                         .with_context(|| format!("Node {i} deliver round {}", self.count))?;
@@ -483,7 +482,6 @@ impl BullsharkNetwork {
             for (i, deliver) in self.deliver_vec.iter_mut().enumerate() {
                 while {
                     let (block, _) = deliver
-                        .rx
                         .recv()
                         .await
                         .with_context(|| format!("Node {i} deliver round {}", self.count))?;

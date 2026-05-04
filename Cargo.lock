@@ -743,7 +743,12 @@ dependencies = [
 name = "libbft-rocksdb"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "borsh",
+ "libbft",
  "rocksdb",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]

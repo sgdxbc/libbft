@@ -4,4 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.102"
+borsh = "1.6.1"
+libbft = { version = "0.1.0", path = "../libbft" }
 rocksdb = "0.24.0"
+tokio-util = "0.7.18"
+tracing = "0.1.44"

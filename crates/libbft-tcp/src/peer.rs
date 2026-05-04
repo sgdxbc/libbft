@@ -2,7 +2,7 @@ use std::{collections::HashMap, net::SocketAddr};
 
 use bytes::Buf;
 use futures_util::{SinkExt, StreamExt, future::OptionFuture};
-use libbft::event::{AsEmit, Emit, EventChannel, EventSender, EventSenderSlot};
+use libbft::event::{AsEmit, Emit, EventChannel, EventReceiver, EventSender, EventSenderSlot};
 use tokio::{
     net::{TcpListener, TcpStream},
     select,
@@ -191,7 +191,7 @@ impl EventSenderSlot<events::HandleBytes> for ConnectionWorker {
 }
 
 impl ConnectionWorker {
-    async fn run(mut self) -> anyhow::Result<()> {
+    async fn run(self) -> anyhow::Result<()> {
         let stream = match self.remote {
             Remote::Connected(stream, _) => stream,
             Remote::Connect(remote_addr) => TcpStream::connect(remote_addr).await?,
@@ -199,7 +199,7 @@ impl ConnectionWorker {
         stream.set_nodelay(true)?; // spellchecker:disable-line
 
         let handle_bytes_tx = self.handle_bytes_tx.unwrap();
-        drop(self.send_bytes.tx);
+        let mut send_bytes = EventReceiver::from(self.send_bytes);
         let (mut write, mut read) = LengthDelimitedCodec::new().framed(stream).split();
         let ingress = async {
             while let Some(mut bytes) = read.next().await.transpose()? {
@@ -219,10 +219,7 @@ impl ConnectionWorker {
             anyhow::Ok(())
         };
         let egress = async {
-            while let Some((bytes, span)) = self.send_bytes.rx.recv().await {
-                if let Some(gauge) = &self.send_bytes.gauge {
-                    gauge.decrement(1);
-                }
+            while let Some((bytes, span)) = send_bytes.recv().await {
                 let context = span.context();
                 let mut carrier = HashMap::new();
                 opentelemetry::global::get_text_map_propagator(|propagator| {

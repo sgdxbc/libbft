@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::{
     common::Payload,
@@ -10,14 +10,7 @@ use crate::{
 };
 
 pub mod events {
-    use tokio::sync::oneshot;
-
-    use crate::{common::Payload, event::Event};
-
-    pub struct Execute;
-    impl Event for Execute {
-        type Value = (Vec<Payload>, oneshot::Sender<Option<Vec<Payload>>>);
-    }
+    pub type Execute = crate::execute::events::Execute;
 }
 
 #[derive(Debug, BorshSerialize, BorshDeserialize)]
@@ -53,28 +46,29 @@ impl MemoryStore {
     }
 
     pub async fn run(&mut self, token: &CancellationToken) {
-        while let Some(Some(((ops, tx), span))) = token.run_until_cancelled(self.op.recv()).await {
+        'outer: while let Some(Some(((ops, tx), span))) =
+            token.run_until_cancelled(self.op.recv()).await
+        {
+            let _enter = span.enter();
             let mut res_vec = Vec::with_capacity(ops.len());
-            span.in_scope(|| {
-                for Payload(op_bytes) in ops {
-                    let Ok(op) = borsh::from_slice(&op_bytes) else {
-                        warn!("failed to deserialize transaction payload");
-                        return;
-                    };
-                    let res = match op {
-                        Op::Get(key) => {
-                            let value = self.data.get(&key).cloned();
-                            Res::Get(value)
-                        }
-                        Op::Put(key, value) => {
-                            self.data.insert(key, value);
-                            Res::Put
-                        }
-                    };
-                    let res_bytes = borsh::to_vec(&res).expect("should serialize response");
-                    res_vec.push(Payload(res_bytes));
-                }
-            });
+            for Payload(op_bytes) in ops {
+                let Ok(op) = borsh::from_slice(&op_bytes) else {
+                    error!("failed to deserialize transaction payload");
+                    continue 'outer;
+                };
+                let res = match op {
+                    Op::Get(key) => {
+                        let value = self.data.get(&key).cloned();
+                        Res::Get(value)
+                    }
+                    Op::Put(key, value) => {
+                        self.data.insert(key, value);
+                        Res::Put
+                    }
+                };
+                let res_bytes = borsh::to_vec(&res).expect("should serialize response");
+                res_vec.push(Payload(res_bytes));
+            }
             if tx.send(Some(res_vec)).is_err() {
                 warn!("client dropped before receiving response");
             }

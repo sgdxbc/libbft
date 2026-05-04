@@ -1,6 +1,7 @@
 pub mod common;
 pub mod crypto;
 pub mod event;
+pub mod execute;
 pub mod hotstuff; // should called hot_stuff, but that looks really really weird
 pub mod kv;
 pub mod narwhal;

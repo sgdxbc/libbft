@@ -14,8 +14,7 @@ pub trait Event {
 
 pub struct EventChannel<E: Event> {
     pub tx: Sender<(E::Value, tracing::Span)>,
-    pub rx: Receiver<(E::Value, tracing::Span)>,
-    pub gauge: Option<Gauge>,
+    receiver: EventReceiver<E>,
 }
 
 #[derive_where(Clone)]
@@ -24,25 +23,35 @@ pub struct EventSender<E: Event> {
     gauge: Option<Gauge>,
 }
 
+pub struct EventReceiver<E: Event> {
+    rx: Receiver<(E::Value, tracing::Span)>,
+    gauge: Option<Gauge>,
+}
+
 impl<E: Event> EventChannel<E> {
     pub fn new(gauge: Option<Gauge>) -> Self {
         let (tx, rx) = channel(1000);
-        Self { tx, rx, gauge }
+        Self {
+            tx,
+            receiver: EventReceiver { rx, gauge },
+        }
     }
 
     pub fn sender(&self) -> EventSender<E> {
         EventSender {
             tx: self.tx.clone(),
-            gauge: self.gauge.clone(),
+            gauge: self.receiver.gauge.clone(),
         }
     }
 
     pub async fn recv(&mut self) -> Option<(E::Value, tracing::Span)> {
-        let event = self.rx.recv().await?;
-        if let Some(gauge) = &self.gauge {
-            gauge.decrement(1);
-        }
-        Some(event)
+        self.receiver.recv().await
+    }
+}
+
+impl<E: Event> From<EventChannel<E>> for EventReceiver<E> {
+    fn from(channel: EventChannel<E>) -> Self {
+        channel.receiver
     }
 }
 
@@ -56,6 +65,16 @@ impl<E: Event> EventSender<E> {
             return false;
         }
         true
+    }
+}
+
+impl<E: Event> EventReceiver<E> {
+    pub async fn recv(&mut self) -> Option<(E::Value, tracing::Span)> {
+        let event = self.rx.recv().await?;
+        if let Some(gauge) = &self.gauge {
+            gauge.decrement(1);
+        }
+        Some(event)
     }
 }
 
