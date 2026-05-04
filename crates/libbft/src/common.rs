@@ -7,55 +7,33 @@ pub type ReplicaIndex = u8;
 pub type ClientId = std::net::SocketAddr;
 pub type ClientSeqNum = u64;
 
-#[derive(BorshSerialize, BorshDeserialize, Clone)]
+#[derive(Debug, BorshSerialize, BorshDeserialize, Clone)]
 pub struct Txn {
     pub client_id: ClientId,
     pub client_seq_num: ClientSeqNum,
-    pub payload: Vec<u8>,
+    pub payload: Payload,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Clone)]
-pub struct TxnCommit {
-    pub client_id: ClientId,
-    pub client_seq_num: ClientSeqNum,
-    pub payload: Vec<u8>,
-}
+pub struct Payload(pub Vec<u8>);
 
 mod debug_impl {
     use std::fmt::Debug;
 
     use super::*;
 
-    impl Debug for Txn {
+    impl Debug for Payload {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("Txn")
-                .field("client_id", &self.client_id)
-                .field("client_seq_num", &self.client_seq_num)
-                .field("payload", &fmt_payload(&self.payload))
-                .finish()
-        }
-    }
-
-    impl Debug for TxnCommit {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("TxnCommit")
-                .field("client_id", &self.client_id)
-                .field("client_seq_num", &self.client_seq_num)
-                .field("payload", &fmt_payload(&self.payload))
-                .finish()
-        }
-    }
-
-    fn fmt_payload(payload: &[u8]) -> String {
-        let s = if let Ok(s) = std::str::from_utf8(payload) {
-            s.into()
-        } else {
-            hex::encode(payload)
-        };
-        if s.len() > 32 {
-            format!("{}...", &s[..32])
-        } else {
-            s
+            let s = if let Ok(s) = std::str::from_utf8(&self.0) {
+                s
+            } else {
+                &hex::encode(&self.0)
+            };
+            if s.len() > 32 {
+                write!(f, "{}...", &s[..32])
+            } else {
+                write!(f, "{s}")
+            }
         }
     }
 }

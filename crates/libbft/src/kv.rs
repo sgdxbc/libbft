@@ -5,21 +5,18 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::{
-    common::TxnCommit,
+    common::Payload,
     event::{Emit, EventChannel},
 };
 
 pub mod events {
     use tokio::sync::oneshot;
 
-    use crate::{
-        common::{Txn, TxnCommit},
-        event::Event,
-    };
+    use crate::{common::Payload, event::Event};
 
     pub struct Execute;
     impl Event for Execute {
-        type Value = (Vec<Txn>, oneshot::Sender<Vec<TxnCommit>>);
+        type Value = (Vec<Payload>, oneshot::Sender<Option<Vec<Payload>>>);
     }
 }
 
@@ -56,13 +53,13 @@ impl MemoryStore {
     }
 
     pub async fn run(&mut self, token: &CancellationToken) {
-        while let Some(Some(((txns, tx), span))) = token.run_until_cancelled(self.op.recv()).await {
-            let mut commits = Vec::with_capacity(txns.len());
+        while let Some(Some(((ops, tx), span))) = token.run_until_cancelled(self.op.recv()).await {
+            let mut res_vec = Vec::with_capacity(ops.len());
             span.in_scope(|| {
-                for txn in txns {
-                    let Ok(op) = borsh::from_slice(&txn.payload) else {
+                for Payload(op_bytes) in ops {
+                    let Ok(op) = borsh::from_slice(&op_bytes) else {
                         warn!("failed to deserialize transaction payload");
-                        continue;
+                        return;
                     };
                     let res = match op {
                         Op::Get(key) => {
@@ -74,15 +71,11 @@ impl MemoryStore {
                             Res::Put
                         }
                     };
-                    let payload = borsh::to_vec(&res).expect("should serialize response");
-                    commits.push(TxnCommit {
-                        client_id: txn.client_id,
-                        client_seq_num: txn.client_seq_num,
-                        payload,
-                    });
+                    let res_bytes = borsh::to_vec(&res).expect("should serialize response");
+                    res_vec.push(Payload(res_bytes));
                 }
             });
-            if tx.send(commits).is_err() {
+            if tx.send(Some(res_vec)).is_err() {
                 warn!("client dropped before receiving response");
             }
         }
