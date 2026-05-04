@@ -63,3 +63,9 @@ Ensuring lossless delivery makes the protocols much more useful to close loop wo
 Remark: this is not a property or even invariant but just an informal guideline.
 It just says that the implementations should achieve this under the certain evaluated conditions, e.g., no leader failover.
 System liveness should not rely on this, just that we can expect that no timeout will involve and complicate the performance benchmarks.
+
+**Type aliases vs. imports.**
+You may see a kind of weird list of type aliases that ought to be imported at the front of a source file of the `libbft` crate.
+I'm not sure this is a good idea with the greatest confidence, but when you lift a source file out of this codebase and plug it into your project (which may not be a good idea either), the type aliases are those _swappable_ stuff that you may redirect them to the choices of your usage, while the imports are more substantial and you probably want to keep them pointing at the original things chosen by this codebase.
+For example, the `pbft/core.rs` source file can be a standalone module where `ReplicaIndex` and `Sig` can be swapped to foreign definitions, while for `pbft.rs`, who actually imports something from the crate, you probably want to copy its submodules and the content of `event.rs` along with it.
+For both cases, there are some external dependencies required, as indicated by the imports.

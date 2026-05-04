@@ -10,6 +10,12 @@ The academic codebase for painless BFT researching and evaluation.
 ![Code lines](./docs/loc-badge.svg)
 </div>
 
+You will find &#x1d695;&#x1d692;&#x1d68b;&#x1d4d1;&#x1d4d5;&#x1d4e3; useful for
+- Developing novel Byzantine fault tolerance protocols or improving on existing ones.
+  The codebase offers all kinds of life-saving scaffolding and standard implementations of seminar protocols, letting you focus on innovation and establish apple-to-apple comparison with least efforts.
+- Developing academic distributed systems that would make use of BFT protocols are building blocks.
+  The protocols are not your contribution and you don't bother to implement by yourself, while the existing implementations do not fit in your codebase and you don't want to bet your evaluation on vibe coding.
+
 ## Highlights
 
 **Perfect observability.**
@@ -24,9 +30,12 @@ No more meditation for reasoning about *where it stuck* or *why it runs so slow*
 ![Prometheus latency screenshot](./docs/screenshots/prometheus-latency.png)
 </details>
 
-**Streamlined protocol implementations in pure state machines.**
-Core protocol logics are completely decoupled with peripheral I/O framework and are suitable for property-based testing.
-They also pay attention to be self-contained and portable: you can easily plug the single source code files into your other awesome projects.
+**Streamlined modular implementations.**
+Everything in the codebase follows actor model with a regular and comprehensive set of interfaces.
+Core protocol state machines are completely decoupled with peripheral I/O framework and are suitable for property-based testing, i.e., [sans I/O].
+Both layers of abstraction are self-contained and portable: you can easily plug the single module into your other awesome projects without depending on the whole crate.
+
+[sans I/O]: https://sans-io.readthedocs.io/
 
 **Highly incremental development workflow.**
 Start from (property-based) test cases.

@@ -4,13 +4,12 @@ use bytes::Buf;
 
 use crate::{
     crypto::{DigestScheme, SigBytes, SigScheme},
-    pbft::{
-        PbftRequest,
-        core::{Checkpoint, PbftSyncMessage, Sig},
-    },
+    pbft::PbftRequest,
 };
 
-use super::core::{Commit, PbftMessage, PbftParams, PrePrepare, Prepare};
+use super::core::{
+    Checkpoint, Commit, PbftMessage, PbftParams, PbftSyncMessage, PrePrepare, Prepare, Sig,
+};
 
 pub trait PbftCryptoContext: SigScheme + DigestScheme {}
 impl<C: SigScheme + DigestScheme> PbftCryptoContext for C {}
